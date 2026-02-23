@@ -32,8 +32,9 @@ static const size_t MAX_MIME = 128;
 static const size_t MAX_FILENAME = 256;
 static const size_t MAX_BODY_BYTES = 10U * 1024U * 1024U;
 static const size_t MAX_REQUEST_BYTES = MAX_BODY_BYTES + 64U * 1024U;
-static const size_t MAX_RESPONSE_BYTES = 16U * 1024U * 1024U;
-static const size_t MAX_PAGE_MARKDOWN = 4U * 1024U * 1024U;
+static const size_t MAX_RESPONSE_BYTES = 1U * 1024U * 1024U;
+static const size_t MAX_BINARY_RESPONSE_BYTES = 10U * 1024U * 1024U;
+static const size_t MAX_PAGE_MARKDOWN = 512U * 1024U;
 static const size_t MAX_LOGO_BYTES = 2U * 1024U * 1024U;
 
 typedef struct {
@@ -94,7 +95,7 @@ typedef struct {
 static volatile sig_atomic_t gKeepRunning = 1;
 static unsigned char gRequestBuffer[MAX_REQUEST_BYTES];
 static unsigned char gResponseBuffer[MAX_RESPONSE_BYTES];
-static unsigned char gBinaryBuffer[MAX_RESPONSE_BYTES];
+static unsigned char gBinaryBuffer[MAX_BINARY_RESPONSE_BYTES];
 
 bool DbOpen(sqlite3** db, const char* dbPath, char* err, size_t errSize);
 bool DbGetPage(sqlite3* db,
@@ -143,6 +144,10 @@ bool ParseFormField(const HttpRequest* request,
                     char* out,
                     size_t outSize);
 void ParseMultipartImage(const HttpRequest* request, MultipartImage* image);
+void HandleRequest(sqlite3* db,
+                   const Config* config,
+                   const HttpRequest* request,
+                   HttpResponse* response);
 
 void SignalHandler(int) {
   gKeepRunning = 0;
@@ -654,6 +659,48 @@ void SelfTestDatabase(SelfTestState* state) {
   (void)unlink(dbPath);
 }
 
+void SelfTestHttpHandler(SelfTestState* state) {
+  sqlite3* db = nullptr;
+  char err[256];
+  if (!DbOpen(&db, ":memory:", err, sizeof(err))) {
+    SelfTestExpect(state, false, "DbOpen in-memory");
+    return;
+  }
+
+  Config config;
+  (void)CopyString(config.listenHost, sizeof(config.listenHost), "127.0.0.1");
+  config.port = 8080;
+  (void)CopyString(config.dbPath, sizeof(config.dbPath), ":memory:");
+  config.assetsPath[0] = '\0';
+  config.maxBodyBytes = MAX_BODY_BYTES;
+  config.runSelfTest = false;
+
+  HttpRequest request;
+  HttpResponse response;
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/page/home");
+  HandleRequest(db, &config, &request, &response);
+  SelfTestExpect(state, response.status == 200, "HandleRequest GET /page/home");
+  SelfTestExpect(state, response.bodyLen > 0U, "HandleRequest body exists");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "Create this page") != nullptr,
+                 "Missing page response content");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/pages");
+  HandleRequest(db, &config, &request, &response);
+  SelfTestExpect(state, response.status == 200, "HandleRequest GET /pages");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "All Pages") != nullptr,
+                 "Pages response content");
+
+  (void)sqlite3_close(db);
+}
+
 int RunSelfTests() {
   SelfTestState state;
   state.passed = 0;
@@ -663,6 +710,7 @@ int RunSelfTests() {
   SelfTestLinksAndMarkdown(&state);
   SelfTestFormAndMultipart(&state);
   SelfTestDatabase(&state);
+  SelfTestHttpHandler(&state);
 
   std::printf("Self-test results: passed=%d failed=%d\n", state.passed,
               state.failed);
@@ -882,14 +930,17 @@ bool ReadRequestFromSocket(int clientFd,
 }
 
 bool DbOpen(sqlite3** db, const char* dbPath, char* err, size_t errSize) {
-  if (sqlite3_open(dbPath, db) != SQLITE_OK) {
+  const int openFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE;
+  if (sqlite3_open_v2(dbPath, db, openFlags, nullptr) != SQLITE_OK) {
     (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(*db));
     return false;
   }
+  sqlite3_extended_result_codes(*db, 1);
 
   const char* migrationSql =
-      "PRAGMA journal_mode=WAL;"
+      "PRAGMA journal_mode=DELETE;"
       "PRAGMA synchronous=NORMAL;"
+      "PRAGMA busy_timeout=5000;"
       "PRAGMA foreign_keys=ON;"
       "CREATE TABLE IF NOT EXISTS pages ("
       "id INTEGER PRIMARY KEY,"
@@ -2096,7 +2147,8 @@ void BuildDefaultCss(TextBuffer* css) {
       "overflow-x:auto;}"
       "code{font-family:\"SF "
       "Mono\",Menlo,Consolas,monospace;background:#eef2ff;padding:0 "
-      "4px;border-radius:4px;}"
+      "4px;border-radius:4px;color:#111827;}"
+      "pre code{background:transparent;color:#f9fafb;padding:0;}"
       "@media(max-width:700px){.header-inner{align-items:flex-start;}nav{"
       "display:flex;flex-wrap:wrap;gap:8px;}nav a{margin-right:0;}}");
 }

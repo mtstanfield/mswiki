@@ -69,10 +69,38 @@ Build:
 docker build -t mswiki:local .
 ```
 
-Run with a single volume mount for data and custom assets:
+Run with a Docker named volume (recommended):
 
 ```sh
-docker run --rm -p 8080:8080 -v "$PWD/data:/data" mswiki:local
+docker volume create mswiki-data
+docker run --rm -p 8080:8080 -v mswiki-data:/data mswiki:local
+```
+
+Build specifically for amd64 (recommended for deployment to x86_64 servers):
+
+```sh
+docker buildx build --platform linux/amd64 -t mswiki:amd64 --load .
+```
+
+Run the amd64 image locally:
+
+```sh
+docker volume create mswiki-data
+docker run --rm --platform linux/amd64 -p 8080:8080 -v mswiki-data:/data mswiki:amd64
+```
+
+To keep a single mounted volume while customizing branding, copy files into the volume-backed `assets` directory:
+
+```sh
+docker run --rm -v mswiki-data:/data -v "$PWD/custom-assets:/in:ro" busybox sh -c 'mkdir -p /data/assets && cp -r /in/* /data/assets/'
+```
+
+Bind mounts from the host can still be used, but on macOS they may require additional ACL/ownership setup for uid/gid `65532`.
+
+If the container exits immediately, inspect logs:
+
+```sh
+docker logs <container-id>
 ```
 
 ## Data layout (SQLite)
