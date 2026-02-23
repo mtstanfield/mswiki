@@ -36,6 +36,9 @@ static const size_t MAX_RESPONSE_BYTES = 1U * 1024U * 1024U;
 static const size_t MAX_BINARY_RESPONSE_BYTES = 10U * 1024U * 1024U;
 static const size_t MAX_PAGE_MARKDOWN = 512U * 1024U;
 static const size_t MAX_LOGO_BYTES = 2U * 1024U * 1024U;
+static const size_t MAX_FOOTNOTES = 64U;
+static const size_t MAX_FOOTNOTE_ID = 32U;
+static const size_t MAX_FOOTNOTE_TEXT = 1024U;
 
 typedef struct {
   char listenHost[64];
@@ -139,6 +142,11 @@ bool DbGetImage(sqlite3* db,
                 bool* found,
                 char* err,
                 size_t errSize);
+bool DbDeleteImage(sqlite3* db,
+                   int id,
+                   const char* pageSlug,
+                   char* err,
+                   size_t errSize);
 bool ParseFormField(const HttpRequest* request,
                     const char* key,
                     char* out,
@@ -537,7 +545,11 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
   TextBuffer html;
   BufferReset(&html);
   const bool rendered = RenderMarkdownToHtml(
-      "# Title\nWiki [[Other Page|Label]]\n* item\n", &html);
+      "# Title\nWiki [[Other Page|Label]][^n]\n"
+      "![Side Image](/image/7)\n"
+      "[^n]: Footnote body.\n"
+      "* item\n",
+      &html);
   SelfTestExpect(state, rendered, "RenderMarkdownToHtml success");
   SelfTestExpect(state, std::strstr(html.data, "<h1>Title</h1>") != nullptr,
                  "Render markdown heading");
@@ -546,6 +558,15 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
                  "Render wiki href");
   SelfTestExpect(state, std::strstr(html.data, ">Label</a>") != nullptr,
                  "Render wiki label");
+  SelfTestExpect(state,
+                 std::strstr(html.data, "class=\"margin-figure\"") != nullptr,
+                 "Render image as margin figure");
+  SelfTestExpect(state, std::strstr(html.data, "class=\"sidenote\"") != nullptr,
+                 "Render sidenote");
+  SelfTestExpect(
+      state,
+      std::strstr(html.data, "<section class=\"panel footnotes\">") != nullptr,
+      "Render footnotes section");
 }
 
 void SelfTestFormAndMultipart(SelfTestState* state) {
@@ -651,6 +672,20 @@ void SelfTestDatabase(SelfTestState* state) {
   SelfTestExpect(state, found, "DbGetImage found row");
   SelfTestExpect(state, std::strcmp(mime, "image/gif") == 0, "DbGetImage mime");
   SelfTestExpect(state, blobLen == 3, "DbGetImage size");
+  if (imageStmt != nullptr) {
+    (void)sqlite3_finalize(imageStmt);
+  }
+
+  const bool deleteImageOk =
+      DbDeleteImage(db, imageId, "home", err, sizeof(err));
+  SelfTestExpect(state, deleteImageOk, "DbDeleteImage call");
+  imageStmt = nullptr;
+  found = true;
+  const bool getDeletedImageOk =
+      DbGetImage(db, imageId, mime, sizeof(mime), &blobData, &blobLen,
+                 &imageStmt, &found, err, sizeof(err));
+  SelfTestExpect(state, getDeletedImageOk, "DbGetImage deleted call");
+  SelfTestExpect(state, !found, "DbDeleteImage removed row");
   if (imageStmt != nullptr) {
     (void)sqlite3_finalize(imageStmt);
   }
@@ -1383,6 +1418,11 @@ bool DbAppendImagesHtml(sqlite3* db,
       any = true;
     }
 
+    char encodedSlug[MAX_PATH];
+    if (!UrlEncode(slug, encodedSlug, sizeof(encodedSlug))) {
+      continue;
+    }
+
     if (!BufferAppendFormat(html, "<li><a href=\"/image/%d\">", id)) {
       (void)sqlite3_finalize(stmt);
       return false;
@@ -1391,8 +1431,21 @@ bool DbAppendImagesHtml(sqlite3* db,
       (void)sqlite3_finalize(stmt);
       return false;
     }
-    if (!BufferAppendFormat(html, "</a> (<code>![](/image/%d)</code>)</li>",
-                            id)) {
+    if (!BufferAppendFormat(html,
+                            "</a> (<code>![](/image/%d)</code>) "
+                            "<form class=\"inline-delete\" method=\"post\" "
+                            "action=\"/images/delete/%d/",
+                            id, id)) {
+      (void)sqlite3_finalize(stmt);
+      return false;
+    }
+    if (!BufferAppend(html, encodedSlug)) {
+      (void)sqlite3_finalize(stmt);
+      return false;
+    }
+    if (!BufferAppend(html,
+                      "\"><button type=\"submit\" "
+                      "class=\"delete-button\">Delete</button></form></li>")) {
       (void)sqlite3_finalize(stmt);
       return false;
     }
@@ -1508,6 +1561,28 @@ bool DbGetImage(sqlite3* db,
   *dataLen = blobSize;
   *stmtOut = stmt;
   *found = true;
+  return true;
+}
+
+bool DbDeleteImage(sqlite3* db,
+                   int id,
+                   const char* pageSlug,
+                   char* err,
+                   size_t errSize) {
+  sqlite3_stmt* stmt = nullptr;
+  const char* sql = "DELETE FROM images WHERE id = ? AND page_slug = ?";
+  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
+    return false;
+  }
+  (void)sqlite3_bind_int(stmt, 1, id);
+  (void)sqlite3_bind_text(stmt, 2, pageSlug, -1, SQLITE_TRANSIENT);
+  if (sqlite3_step(stmt) != SQLITE_DONE) {
+    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
+    (void)sqlite3_finalize(stmt);
+    return false;
+  }
+  (void)sqlite3_finalize(stmt);
   return true;
 }
 
@@ -1746,9 +1821,156 @@ bool ParseFormField(const HttpRequest* request,
   return false;
 }
 
-bool WriteInlineMarkdown(TextBuffer* out, const char* text, size_t len) {
+bool ParseFootnoteDefinitionLine(const char* line,
+                                 size_t lineLen,
+                                 char* id,
+                                 size_t idSize,
+                                 char* text,
+                                 size_t textSize) {
+  if (lineLen < 6U || line[0] != '[' || line[1] != '^') {
+    return false;
+  }
+  size_t i = 2U;
+  size_t idLen = 0U;
+  while (i < lineLen && line[i] != ']') {
+    if (idLen + 1U >= idSize) {
+      return false;
+    }
+    id[idLen++] = line[i++];
+  }
+  if (i + 2U >= lineLen || line[i] != ']' || line[i + 1U] != ':') {
+    return false;
+  }
+  i += 2U;
+  while (i < lineLen && line[i] == ' ') {
+    i++;
+  }
+  size_t textLen = 0U;
+  while (i < lineLen) {
+    if (textLen + 1U >= textSize) {
+      return false;
+    }
+    text[textLen++] = line[i++];
+  }
+  id[idLen] = '\0';
+  text[textLen] = '\0';
+  return idLen > 0U;
+}
+
+int FindFootnoteIndex(const char ids[][MAX_FOOTNOTE_ID],
+                      size_t count,
+                      const char* id) {
+  for (size_t i = 0; i < count; i++) {
+    if (std::strcmp(ids[i], id) == 0) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+bool WriteInlineMarkdown(TextBuffer* out,
+                         const char* text,
+                         size_t len,
+                         const char footnoteIds[][MAX_FOOTNOTE_ID],
+                         const char footnoteText[][MAX_FOOTNOTE_TEXT],
+                         size_t footnoteCount,
+                         int* footnoteOrder,
+                         int* nextFootnoteNumber) {
   size_t i = 0;
   while (i < len) {
+    if (i + 5U < len && text[i] == '!' && text[i + 1U] == '[') {
+      size_t closeBracket = i + 2U;
+      while (closeBracket < len && text[closeBracket] != ']') {
+        closeBracket++;
+      }
+      if (closeBracket + 1U < len && text[closeBracket + 1U] == '(') {
+        size_t closeParen = closeBracket + 2U;
+        while (closeParen < len && text[closeParen] != ')') {
+          closeParen++;
+        }
+        if (closeParen < len) {
+          if (!BufferAppend(out,
+                            "<figure class=\"margin-figure\"><a href=\"")) {
+            return false;
+          }
+          if (!BufferAppendEscaped(out, text + closeBracket + 2U,
+                                   closeParen - (closeBracket + 2U))) {
+            return false;
+          }
+          if (!BufferAppend(
+                  out, "\" target=\"_blank\" rel=\"noopener\"><img src=\"")) {
+            return false;
+          }
+          if (!BufferAppendEscaped(out, text + closeBracket + 2U,
+                                   closeParen - (closeBracket + 2U))) {
+            return false;
+          }
+          if (!BufferAppend(out, "\" alt=\"")) {
+            return false;
+          }
+          if (!BufferAppendEscaped(out, text + i + 2U,
+                                   closeBracket - (i + 2U))) {
+            return false;
+          }
+          if (!BufferAppend(out, "\" loading=\"lazy\"></a><figcaption>")) {
+            return false;
+          }
+          if (!BufferAppendEscaped(out, text + i + 2U,
+                                   closeBracket - (i + 2U))) {
+            return false;
+          }
+          if (!BufferAppend(out, "</figcaption></figure>")) {
+            return false;
+          }
+          i = closeParen + 1U;
+          continue;
+        }
+      }
+    }
+
+    if (i + 4U < len && text[i] == '[' && text[i + 1U] == '^') {
+      size_t closeBracket = i + 2U;
+      while (closeBracket < len && text[closeBracket] != ']') {
+        closeBracket++;
+      }
+      if (closeBracket < len) {
+        char id[MAX_FOOTNOTE_ID];
+        size_t idLen = 0U;
+        for (size_t j = i + 2U; j < closeBracket; j++) {
+          if (idLen + 1U >= sizeof(id)) {
+            break;
+          }
+          id[idLen++] = text[j];
+        }
+        id[idLen] = '\0';
+        const int idx = FindFootnoteIndex(footnoteIds, footnoteCount, id);
+        if (idx >= 0) {
+          if (footnoteOrder[idx] == 0) {
+            footnoteOrder[idx] = *nextFootnoteNumber;
+            *nextFootnoteNumber += 1;
+          }
+          const int number = footnoteOrder[idx];
+          if (!BufferAppendFormat(
+                  out,
+                  "<sup class=\"footnote-ref\"><a href=\"#fn-%s\">%d</a></sup>"
+                  "<span class=\"sidenote\" id=\"sidenote-%s\"><span "
+                  "class=\"sidenote-number\">%d.</span> ",
+                  footnoteIds[idx], number, footnoteIds[idx], number)) {
+            return false;
+          }
+          if (!BufferAppendEscaped(out, footnoteText[idx],
+                                   std::strlen(footnoteText[idx]))) {
+            return false;
+          }
+          if (!BufferAppend(out, "</span>")) {
+            return false;
+          }
+          i = closeBracket + 1U;
+          continue;
+        }
+      }
+    }
+
     if (i + 3U < len && text[i] == '[' && text[i + 1U] == '[') {
       size_t end = i + 2U;
       while (end + 1U < len && !(text[end] == ']' && text[end + 1U] == ']')) {
@@ -1863,6 +2085,41 @@ bool WriteInlineMarkdown(TextBuffer* out, const char* text, size_t len) {
 
 bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
   const size_t len = std::strlen(markdown);
+  char footnoteIds[MAX_FOOTNOTES][MAX_FOOTNOTE_ID];
+  char footnoteText[MAX_FOOTNOTES][MAX_FOOTNOTE_TEXT];
+  int footnoteOrder[MAX_FOOTNOTES];
+  size_t footnoteCount = 0U;
+  int nextFootnoteNumber = 1;
+  for (size_t i = 0; i < MAX_FOOTNOTES; i++) {
+    footnoteOrder[i] = 0;
+  }
+
+  size_t scanStart = 0;
+  while (scanStart <= len) {
+    size_t scanEnd = scanStart;
+    while (scanEnd < len && markdown[scanEnd] != '\n') {
+      scanEnd++;
+    }
+    size_t lineLen = scanEnd - scanStart;
+    if (lineLen > 0U && markdown[scanEnd - 1U] == '\r') {
+      lineLen--;
+    }
+    char id[MAX_FOOTNOTE_ID];
+    char text[MAX_FOOTNOTE_TEXT];
+    if (footnoteCount < MAX_FOOTNOTES &&
+        ParseFootnoteDefinitionLine(markdown + scanStart, lineLen, id,
+                                    sizeof(id), text, sizeof(text))) {
+      (void)CopyString(footnoteIds[footnoteCount], sizeof(footnoteIds[0]), id);
+      (void)CopyString(footnoteText[footnoteCount], sizeof(footnoteText[0]),
+                       text);
+      footnoteCount += 1U;
+    }
+    if (scanEnd == len) {
+      break;
+    }
+    scanStart = scanEnd + 1U;
+  }
+
   size_t lineStart = 0;
   bool inCodeBlock = false;
   bool inList = false;
@@ -1879,6 +2136,16 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
     }
 
     const char* line = markdown + lineStart;
+    char footId[MAX_FOOTNOTE_ID];
+    char footText[MAX_FOOTNOTE_TEXT];
+    if (ParseFootnoteDefinitionLine(line, lineLen, footId, sizeof(footId),
+                                    footText, sizeof(footText))) {
+      if (lineEnd == len) {
+        break;
+      }
+      lineStart = lineEnd + 1U;
+      continue;
+    }
 
     if (lineLen >= 3U && std::strncmp(line, "```", 3) == 0) {
       if (inList) {
@@ -1923,7 +2190,9 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
       if (!BufferAppend(html, "<li>")) {
         return false;
       }
-      if (!WriteInlineMarkdown(html, line + 2, lineLen - 2U)) {
+      if (!WriteInlineMarkdown(html, line + 2, lineLen - 2U, footnoteIds,
+                               footnoteText, footnoteCount, footnoteOrder,
+                               &nextFootnoteNumber)) {
         return false;
       }
       if (!BufferAppend(html, "</li>")) {
@@ -1947,7 +2216,9 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
           return false;
         }
         if (!WriteInlineMarkdown(html, line + hashes + 1U,
-                                 lineLen - hashes - 1U)) {
+                                 lineLen - hashes - 1U, footnoteIds,
+                                 footnoteText, footnoteCount, footnoteOrder,
+                                 &nextFootnoteNumber)) {
           return false;
         }
         if (!BufferAppendFormat(html, "</h%zu>", hashes)) {
@@ -1957,7 +2228,9 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
         if (!BufferAppend(html, "<p>")) {
           return false;
         }
-        if (!WriteInlineMarkdown(html, line, lineLen)) {
+        if (!WriteInlineMarkdown(html, line, lineLen, footnoteIds, footnoteText,
+                                 footnoteCount, footnoteOrder,
+                                 &nextFootnoteNumber)) {
           return false;
         }
         if (!BufferAppend(html, "</p>")) {
@@ -1979,6 +2252,42 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
   }
   if (inCodeBlock) {
     if (!BufferAppend(html, "</code></pre>")) {
+      return false;
+    }
+  }
+
+  bool anyFootnotes = false;
+  for (size_t i = 0; i < footnoteCount; i++) {
+    if (footnoteOrder[i] > 0) {
+      anyFootnotes = true;
+      break;
+    }
+  }
+  if (anyFootnotes) {
+    if (!BufferAppend(
+            html,
+            "<section class=\"panel footnotes\"><h2>Footnotes</h2><ol>")) {
+      return false;
+    }
+    for (size_t i = 0; i < footnoteCount; i++) {
+      if (footnoteOrder[i] == 0) {
+        continue;
+      }
+      if (!BufferAppendFormat(html,
+                              "<li id=\"fn-%s\"><span class=\"meta\">%d."
+                              "</span> ",
+                              footnoteIds[i], footnoteOrder[i])) {
+        return false;
+      }
+      if (!BufferAppendEscaped(html, footnoteText[i],
+                               std::strlen(footnoteText[i]))) {
+        return false;
+      }
+      if (!BufferAppend(html, "</li>")) {
+        return false;
+      }
+    }
+    if (!BufferAppend(html, "</ol></section>")) {
       return false;
     }
   }
@@ -2110,14 +2419,14 @@ bool BuildPageLayout(const Config* config,
 void BuildDefaultCss(TextBuffer* css) {
   (void)BufferAppend(
       css,
-      ":root{--bg:#f8fafc;--surface:#ffffff;--text:#111827;--muted:#4b5563;"
-      "--line:#d1d5db;--accent:#0f766e;--accent-hover:#0b5f59;}"
+      ":root{--bg:#f8f5ee;--surface:#fffdf9;--text:#1e1c1a;--muted:#6b6259;"
+      "--line:#ded5c7;--accent:#1f5d78;--accent-hover:#17465a;--paper:#fffcf7;}"
       "*{box-sizing:border-box;}"
-      "body{margin:0;padding:0;background:linear-gradient(180deg,#f8fafc "
-      "0%,#eef2f7 100%);"
-      "color:var(--text);font-family:\"Iowan Old Style\",\"Palatino "
-      "Linotype\",Palatino,serif;line-height:1.5;}"
-      "header{border-bottom:1px solid var(--line);background:var(--surface);}"
+      "body{margin:0;padding:0;background:linear-gradient(180deg,#fdfaf4 "
+      "0%,#f4ede2 100%);"
+      "color:var(--text);font-family:\"ETBembo\",\"Iowan Old Style\","
+      "\"Palatino Linotype\",Palatino,serif;line-height:1.62;}"
+      "header{border-bottom:1px solid var(--line);background:var(--paper);}"
       ".header-inner{max-width:980px;margin:0 auto;padding:12px "
       "16px;display:flex;"
       "flex-wrap:wrap;align-items:center;justify-content:space-between;gap:"
@@ -2125,30 +2434,57 @@ void BuildDefaultCss(TextBuffer* css) {
       ".brand{display:flex;align-items:center;gap:10px;text-decoration:none;"
       "color:var(--text);}"
       ".brand img{max-height:36px;width:auto;}"
-      "nav a{margin-right:12px;color:var(--accent);text-decoration:none;}"
+      "nav a{margin-right:12px;color:var(--accent);text-decoration:none;"
+      "font-size:.95rem;}"
       "nav a:hover{text-decoration:underline;}"
-      "main{max-width:980px;margin:0 auto;padding:20px 16px 48px;}"
-      "article{background:var(--surface);border:1px solid "
-      "var(--line);border-radius:10px;padding:20px;}"
+      "main{max-width:1120px;margin:0 auto;padding:30px 24px 56px;}"
+      "article{position:relative;background:var(--paper);border:1px solid "
+      "var(--line);border-radius:6px;padding:36px 42% 36px 56px;}"
+      ".content-body{max-width:66ch;}"
+      "h1,h2,h3,h4{font-weight:500;line-height:1.25;letter-spacing:-.01em;}"
+      "p,li{font-size:1.08rem;}"
+      "a{color:var(--accent);}"
       "textarea,input[type=\"text\"]{width:100%;border:1px solid "
-      "var(--line);border-radius:8px;padding:10px;font:inherit;}"
+      "var(--line);border-radius:4px;padding:10px;font:inherit;background:#fff;"
+      "}"
       "textarea{min-height:340px;font-family:\"SF "
       "Mono\",Menlo,Consolas,monospace;}"
       "button{border:0;border-radius:8px;background:var(--accent);color:#fff;"
       "padding:10px 14px;font:inherit;cursor:pointer;}"
       "button:hover{background:var(--accent-hover);}"
+      ".delete-button{background:#8a2f2f;padding:6px 10px;font-size:.85rem;}"
+      ".delete-button:hover{background:#6f2525;}"
+      ".inline-delete{display:inline-block;margin-left:10px;}"
       ".meta{color:var(--muted);font-size:.9rem;}"
       ".notice{padding:10px 12px;border-left:4px solid "
-      "var(--accent);background:#ecfeff;}"
+      "var(--accent);background:#eef7fb;}"
       ".panel{margin-top:16px;padding-top:12px;border-top:1px solid "
       "var(--line);}"
       "ul.page-list,ul.backlinks,ul.images{padding-left:18px;}"
-      "pre{background:#111827;color:#f9fafb;padding:12px;border-radius:8px;"
+      "pre{background:#141414;color:#f4f4f4;padding:12px;border-radius:8px;"
       "overflow-x:auto;}"
       "code{font-family:\"SF "
       "Mono\",Menlo,Consolas,monospace;background:#eef2ff;padding:0 "
       "4px;border-radius:4px;color:#111827;}"
       "pre code{background:transparent;color:#f9fafb;padding:0;}"
+      ".margin-figure,.sidenote{float:right;clear:right;width:32%;margin-right:"
+      "-38%;"
+      "font-size:.9rem;line-height:1.45;color:var(--muted);}"
+      ".margin-figure{margin-top:.25rem;margin-bottom:1.1rem;}"
+      ".margin-figure img{width:100%;height:auto;display:block;border:1px "
+      "solid var(--line);"
+      "box-shadow:0 2px 12px rgba(0,0,0,.08);}"
+      ".margin-figure figcaption{margin-top:.3rem;}"
+      ".footnote-ref{font-size:.8rem;vertical-align:super;}"
+      ".sidenote{display:block;margin-top:.4rem;margin-bottom:.8rem;padding-"
+      "left:.8rem;"
+      "border-left:2px solid var(--line);}"
+      ".sidenote-number{font-weight:600;margin-right:.35rem;}"
+      "@media(max-width:1020px){article{padding:24px;} "
+      ".content-body{max-width:none;}"
+      ".margin-figure,.sidenote{float:none;width:100%;margin:12px "
+      "0;padding-left:0;"
+      "border-left:0;} .margin-figure img{max-width:100%;}}"
       "@media(max-width:700px){.header-inner{align-items:flex-start;}nav{"
       "display:flex;flex-wrap:wrap;gap:8px;}nav a{margin-right:0;}}");
 }
@@ -2246,6 +2582,8 @@ bool BuildEditHtml(const Config* config,
           &content,
           "</textarea><br><p class=\"meta\">Wiki links: "
           "<code>[[Target Page]]</code> or <code>[[target|label]]</code>.</p>"
+          "<p class=\"meta\">Footnotes: <code>[^id]</code> in text and "
+          "<code>[^id]: note</code> definitions.</p>"
           "<button type=\"submit\">Save</button> <a href=\"/page/")) {
     return false;
   }
@@ -2346,7 +2684,13 @@ bool BuildViewHtml(sqlite3* db,
     return false;
   }
 
+  if (!BufferAppend(&content, "<div class=\"content-body\">")) {
+    return false;
+  }
   if (!BufferAppend(&content, markdownHtml.data)) {
+    return false;
+  }
+  if (!BufferAppend(&content, "</div>")) {
     return false;
   }
 
@@ -2788,6 +3132,54 @@ void HandleRequest(sqlite3* db,
                          html.length)) {
       SetError(response, 500, "HTML response too large");
     }
+    return;
+  }
+
+  if (std::strcmp(request->method, "POST") == 0 &&
+      std::strncmp(request->path, "/images/delete/", 15) == 0) {
+    const char* rest = request->path + 15;
+    const char* slash = std::strchr(rest, '/');
+    if (slash == nullptr) {
+      SetError(response, 400, "Invalid delete image path");
+      return;
+    }
+    char idText[32];
+    const size_t idLen = static_cast<size_t>(slash - rest);
+    if (idLen == 0U || idLen + 1U > sizeof(idText)) {
+      SetError(response, 400, "Invalid image id");
+      return;
+    }
+    (void)std::memcpy(idText, rest, idLen);
+    idText[idLen] = '\0';
+    const int imageId = std::atoi(idText);
+    if (imageId <= 0) {
+      SetError(response, 400, "Invalid image id");
+      return;
+    }
+
+    char decodedSlug[MAX_PATH];
+    (void)UrlDecode(decodedSlug, sizeof(decodedSlug), slash + 1U,
+                    std::strlen(slash + 1U));
+    char slug[MAX_SLUG];
+    if (!Slugify(decodedSlug, slug, sizeof(slug)) || !IsSafeSlug(slug)) {
+      SetError(response, 400, "Invalid page slug");
+      return;
+    }
+
+    char err[256];
+    if (!DbDeleteImage(db, imageId, slug, err, sizeof(err))) {
+      SetError(response, 500, err);
+      return;
+    }
+
+    char encodedSlug[MAX_PATH];
+    char location[768];
+    if (!UrlEncode(slug, encodedSlug, sizeof(encodedSlug))) {
+      SetError(response, 500, "slug encode failed");
+      return;
+    }
+    (void)std::snprintf(location, sizeof(location), "/page/%s", encodedSlug);
+    SetRedirect(response, location);
     return;
   }
 

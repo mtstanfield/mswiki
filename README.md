@@ -6,8 +6,12 @@
 
 - Markdown page storage in SQLite (`pages.markdown`)
 - Wiki-style links with backlink index (`[[Page Name]]` and `[[slug|label]]`)
+- Tufte-inspired page styling with right-margin sidenotes and margin figures
+- Footnotes via `[^id]` references and `[^id]: definition` blocks
 - Minimal web UI for browse/edit/create
 - Image uploads stored in SQLite BLOBs
+- Rendered page images are scaled inline as margin figures and open full-size on click
+- Uploaded images can be deleted from the page image list
 - Optional runtime branding from assets directory:
   - `/data/assets/style.css`
   - `/data/assets/logo.svg|logo.png|logo.jpg|logo.jpeg|logo.gif`
