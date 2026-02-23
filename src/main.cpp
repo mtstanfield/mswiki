@@ -152,6 +152,8 @@ bool ParseFormField(const HttpRequest* request,
                     char* out,
                     size_t outSize);
 void ParseMultipartImage(const HttpRequest* request, MultipartImage* image);
+bool ParseRequestLine(const char* line, HttpRequest* request);
+const char* DetectImageMimeFromData(const unsigned char* data, size_t len);
 void HandleRequest(sqlite3* db,
                    const Config* config,
                    const HttpRequest* request,
@@ -244,6 +246,39 @@ int ToLowerAscii(int ch) {
     return ch - 'A' + 'a';
   }
   return ch;
+}
+
+bool ParseUnsignedSizeStrict(const char* text, size_t* out) {
+  if (text == nullptr || text[0] == '\0') {
+    return false;
+  }
+  size_t value = 0U;
+  size_t i = 0U;
+  while (text[i] != '\0') {
+    if (text[i] < '0' || text[i] > '9') {
+      return false;
+    }
+    const size_t digit = static_cast<size_t>(text[i] - '0');
+    if (value > (SIZE_MAX - digit) / 10U) {
+      return false;
+    }
+    value = value * 10U + digit;
+    i++;
+  }
+  *out = value;
+  return true;
+}
+
+bool ParsePositiveIntStrict(const char* text, int* out) {
+  size_t value = 0U;
+  if (!ParseUnsignedSizeStrict(text, &value)) {
+    return false;
+  }
+  if (value == 0U || value > static_cast<size_t>(INT32_MAX)) {
+    return false;
+  }
+  *out = static_cast<int>(value);
+  return true;
 }
 
 void LowerString(char* text) {
@@ -531,6 +566,13 @@ void SelfTestSlugAndCodec(SelfTestState* state) {
   (void)UrlDecode(decoded, sizeof(decoded), "a%20b%2Fc+z", 11U);
   SelfTestExpect(state, std::strcmp(decoded, "a b/c z") == 0,
                  "UrlDecode reverses escapes");
+
+  int parsedPositive = 0;
+  SelfTestExpect(state, ParsePositiveIntStrict("42", &parsedPositive),
+                 "ParsePositiveIntStrict valid");
+  SelfTestExpect(state, parsedPositive == 42, "ParsePositiveIntStrict value");
+  SelfTestExpect(state, !ParsePositiveIntStrict("42x", &parsedPositive),
+                 "ParsePositiveIntStrict rejects suffix");
 }
 
 void SelfTestLinksAndMarkdown(SelfTestState* state) {
@@ -567,6 +609,13 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
       state,
       std::strstr(html.data, "<section class=\"panel footnotes\">") != nullptr,
       "Render footnotes section");
+
+  static const unsigned char PNG_SIG[] = {0x89U, 0x50U, 0x4EU, 0x47U,
+                                          0x0DU, 0x0AU, 0x1AU, 0x0AU};
+  SelfTestExpect(state,
+                 std::strcmp(DetectImageMimeFromData(PNG_SIG, sizeof(PNG_SIG)),
+                             "image/png") == 0,
+                 "DetectImageMimeFromData png");
 }
 
 void SelfTestFormAndMultipart(SelfTestState* state) {
@@ -733,6 +782,13 @@ void SelfTestHttpHandler(SelfTestState* state) {
                              "All Pages") != nullptr,
                  "Pages response content");
 
+  HttpRequest parsedRequest;
+  (void)std::memset(&parsedRequest, 0, sizeof(parsedRequest));
+  SelfTestExpect(state, !ParseRequestLine("GET / HTTP/2", &parsedRequest),
+                 "ParseRequestLine rejects HTTP/2");
+  SelfTestExpect(state, ParseRequestLine("GET / HTTP/1.1", &parsedRequest),
+                 "ParseRequestLine accepts HTTP/1.1");
+
   (void)sqlite3_close(db);
 }
 
@@ -778,6 +834,10 @@ bool ParseRequestLine(const char* line, HttpRequest* request) {
   int matched = std::sscanf(line, "%7s %1023s %15s", request->method,
                             request->target, version);
   if (matched != 3) {
+    return false;
+  }
+  if (std::strcmp(version, "HTTP/1.1") != 0 &&
+      std::strcmp(version, "HTTP/1.0") != 0) {
     return false;
   }
 
@@ -913,29 +973,30 @@ bool ReadRequestFromSocket(int clientFd,
     }
   }
 
-  size_t contentLength = 0;
+  HttpRequest parsed;
+  const unsigned char* bodyStart = nullptr;
+  size_t bodyOffset = 0U;
+  if (!ParseHttpRequest(out, *outLen, &parsed, &bodyStart, &bodyOffset)) {
+    return false;
+  }
+
+  size_t contentLength = 0U;
   bool hasContentLength = false;
-  for (size_t i = 0; i + 14U < headerEnd; i++) {
-    if (ToLowerAscii(out[i]) == 'c' && ToLowerAscii(out[i + 1U]) == 'o' &&
-        ToLowerAscii(out[i + 2U]) == 'n' && ToLowerAscii(out[i + 3U]) == 't' &&
-        ToLowerAscii(out[i + 4U]) == 'e' && ToLowerAscii(out[i + 5U]) == 'n' &&
-        ToLowerAscii(out[i + 6U]) == 't' && ToLowerAscii(out[i + 7U]) == '-' &&
-        ToLowerAscii(out[i + 8U]) == 'l' && ToLowerAscii(out[i + 9U]) == 'e' &&
-        ToLowerAscii(out[i + 10U]) == 'n' &&
-        ToLowerAscii(out[i + 11U]) == 'g' &&
-        ToLowerAscii(out[i + 12U]) == 't' &&
-        ToLowerAscii(out[i + 13U]) == 'h' && out[i + 14U] == ':') {
-      size_t j = i + 15U;
-      while (j < headerEnd && (out[j] == ' ' || out[j] == '\t')) {
-        j++;
+  for (size_t i = 0; i < parsed.headerCount; i++) {
+    if (std::strcmp(parsed.headers[i].key, "transfer-encoding") == 0) {
+      return false;
+    }
+    if (std::strcmp(parsed.headers[i].key, "content-length") == 0) {
+      size_t candidate = 0U;
+      if (!ParseUnsignedSizeStrict(parsed.headers[i].value, &candidate)) {
+        return false;
       }
-      while (j < headerEnd && out[j] >= '0' && out[j] <= '9') {
+      if (!hasContentLength) {
+        contentLength = candidate;
         hasContentLength = true;
-        contentLength =
-            (contentLength * 10U) + static_cast<size_t>(out[j] - '0');
-        j++;
+      } else if (contentLength != candidate) {
+        return false;
       }
-      break;
     }
   }
 
@@ -1928,7 +1989,7 @@ bool WriteInlineMarkdown(TextBuffer* out,
       }
     }
 
-    if (i + 4U < len && text[i] == '[' && text[i + 1U] == '^') {
+    if (i + 3U < len && text[i] == '[' && text[i + 1U] == '^') {
       size_t closeBracket = i + 2U;
       while (closeBracket < len && text[closeBracket] != ']') {
         closeBracket++;
@@ -2320,6 +2381,29 @@ const char* DetectMimeType(const char* filename) {
     return "image/webp";
   }
   return "application/octet-stream";
+}
+
+const char* DetectImageMimeFromData(const unsigned char* data, size_t len) {
+  if (data == nullptr || len < 4U) {
+    return nullptr;
+  }
+  if (data[0] == 0xFFU && data[1] == 0xD8U && data[2] == 0xFFU) {
+    return "image/jpeg";
+  }
+  if (len >= 8U && data[0] == 0x89U && data[1] == 0x50U && data[2] == 0x4EU &&
+      data[3] == 0x47U && data[4] == 0x0DU && data[5] == 0x0AU &&
+      data[6] == 0x1AU && data[7] == 0x0AU) {
+    return "image/png";
+  }
+  if (len >= 6U && ((std::memcmp(data, "GIF87a", 6U) == 0) ||
+                    (std::memcmp(data, "GIF89a", 6U) == 0))) {
+    return "image/gif";
+  }
+  if (len >= 12U && std::memcmp(data, "RIFF", 4U) == 0 &&
+      std::memcmp(data + 8U, "WEBP", 4U) == 0) {
+    return "image/webp";
+  }
+  return nullptr;
 }
 
 bool ReadFile(const char* path,
@@ -2917,8 +3001,8 @@ void HandleRequest(sqlite3* db,
   if (std::strcmp(request->method, "GET") == 0 &&
       std::strncmp(request->path, "/image/", 7) == 0) {
     const char* idText = request->path + 7;
-    const int imageId = std::atoi(idText);
-    if (imageId <= 0) {
+    int imageId = 0;
+    if (!ParsePositiveIntStrict(idText, &imageId)) {
       SetError(response, 400, "Invalid image id");
       return;
     }
@@ -2945,7 +3029,12 @@ void HandleRequest(sqlite3* db,
     }
     (void)std::memcpy(gBinaryBuffer, blobData, static_cast<size_t>(blobLen));
     (void)sqlite3_finalize(stmt);
-    SetResponse(response, 200, mime, gBinaryBuffer,
+    const char* detectedMime =
+        DetectImageMimeFromData(gBinaryBuffer, static_cast<size_t>(blobLen));
+    const char* safeMime =
+        (detectedMime == nullptr) ? "application/octet-stream" : detectedMime;
+    (void)mime;
+    SetResponse(response, 200, safeMime, gBinaryBuffer,
                 static_cast<size_t>(blobLen));
     return;
   }
@@ -3116,7 +3205,14 @@ void HandleRequest(sqlite3* db,
 
     int imageId = 0;
     char err[256];
-    if (!DbInsertImage(db, slug, image.filename, image.mimeType, image.data,
+    const char* detectedMime =
+        DetectImageMimeFromData(image.data, image.dataLen);
+    if (detectedMime == nullptr) {
+      SetError(response, 400, "Unsupported image format");
+      return;
+    }
+
+    if (!DbInsertImage(db, slug, image.filename, detectedMime, image.data,
                        image.dataLen, &imageId, err, sizeof(err))) {
       SetError(response, 500, err);
       return;
@@ -3151,8 +3247,8 @@ void HandleRequest(sqlite3* db,
     }
     (void)std::memcpy(idText, rest, idLen);
     idText[idLen] = '\0';
-    const int imageId = std::atoi(idText);
-    if (imageId <= 0) {
+    int imageId = 0;
+    if (!ParsePositiveIntStrict(idText, &imageId)) {
       SetError(response, 400, "Invalid image id");
       return;
     }
