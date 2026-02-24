@@ -99,6 +99,8 @@ docker run --rm --platform linux/amd64 mswiki:fuzz
 
 The default fuzz target is HTTP request fuzzing and loads
 `fuzz/http_request.dict`.
+The default run also enforces `-timeout=5` seconds per input to avoid
+pathological slow-unit stalls.
 
 The image includes starter seeds in `/corpus/http_request`,
 `/corpus/markdown`, and `/corpus/multipart`.

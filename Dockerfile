@@ -32,7 +32,7 @@ RUN mkdir -p /corpus/http_request /corpus/markdown /corpus/multipart \
     && cp -f /src/fuzz/seeds/multipart/*.bin /corpus/multipart/
 ENV ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:symbolize=1
 ENV UBSAN_OPTIONS=print_stacktrace=1
-ENTRYPOINT ["/src/fuzz-build/mswiki_http_fuzz", "-dict=/src/fuzz/http_request.dict", "-max_total_time=60", "/corpus/http_request"]
+ENTRYPOINT ["/src/fuzz-build/mswiki_http_fuzz", "-dict=/src/fuzz/http_request.dict", "-timeout=5", "-max_total_time=60", "/corpus/http_request"]
 
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
