@@ -306,6 +306,31 @@ int ToLowerAscii(int ch) {
 }
 
 /**
+ * Purpose: Determine whether a character is a hexadecimal digit.
+ * Inputs: `ch` integer character value.
+ * Outputs: Returns true for [0-9a-fA-F]; false otherwise.
+ */
+bool IsHexDigitAscii(int ch) {
+  return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') ||
+         (ch >= 'A' && ch <= 'F');
+}
+
+/**
+ * Purpose: Convert a hexadecimal digit character to its numeric value.
+ * Inputs: `ch` must be a hexadecimal digit.
+ * Outputs: Returns value in range [0, 15].
+ */
+int HexDigitValue(int ch) {
+  if (ch >= '0' && ch <= '9') {
+    return ch - '0';
+  }
+  if (ch >= 'a' && ch <= 'f') {
+    return ch - 'a' + 10;
+  }
+  return ch - 'A' + 10;
+}
+
+/**
  * Purpose: Parse a base-10 unsigned integer with strict full-string validation.
  * Inputs: `text` digits-only C string; `out` writable result pointer.
  * Outputs: Returns true and writes parsed value on success; false on empty,
@@ -411,18 +436,19 @@ bool CopyString(char* dst, size_t dstSize, const char* src) {
  * outSize > 0.
  */
 size_t UrlDecode(char* out, size_t outSize, const char* in, size_t inLen) {
+  if (outSize == 0U) {
+    return 0U;
+  }
   size_t outLen = 0;
   for (size_t i = 0; i < inLen; i++) {
     if (outLen + 1U >= outSize) {
       break;
     }
-    if (in[i] == '%' && i + 2U < inLen) {
-      char hex[3];
-      hex[0] = in[i + 1U];
-      hex[1] = in[i + 2U];
-      hex[2] = '\0';
-      const long value = std::strtol(hex, nullptr, 16);
-      out[outLen++] = static_cast<char>(value);
+    if (in[i] == '%' && i + 2U < inLen && IsHexDigitAscii(in[i + 1U]) &&
+        IsHexDigitAscii(in[i + 2U])) {
+      const int hi = HexDigitValue(in[i + 1U]);
+      const int lo = HexDigitValue(in[i + 2U]);
+      out[outLen++] = static_cast<char>((hi << 4) | lo);
       i += 2U;
     } else if (in[i] == '+') {
       out[outLen++] = ' ';
@@ -728,6 +754,9 @@ void SelfTestSlugAndCodec(SelfTestState* state) {
   (void)UrlDecode(decoded, sizeof(decoded), "a%20b%2Fc+z", 11U);
   SelfTestExpect(state, std::strcmp(decoded, "a b/c z") == 0,
                  "UrlDecode reverses escapes");
+  (void)UrlDecode(decoded, sizeof(decoded), "bad%GGvalue", 11U);
+  SelfTestExpect(state, std::strcmp(decoded, "bad%GGvalue") == 0,
+                 "UrlDecode leaves malformed escapes literal");
 
   int parsedPositive = 0;
   SelfTestExpect(state, ParsePositiveIntStrict("42", &parsedPositive),
@@ -984,6 +1013,15 @@ void SelfTestHttpHandler(SelfTestState* state) {
                  ParseHttpRequest(rawWithHost, sizeof(rawWithHost) - 1U,
                                   &parsedRequest, &bodyStart, &bodyOffset),
                  "ParseHttpRequest accepts HTTP/1.1 with host");
+  unsigned char rawBadHeader[] =
+      "GET / HTTP/1.1\r\nHost: wiki.local\r\nXBad\r\n\r\n";
+  SelfTestExpect(state,
+                 !ParseHttpRequest(rawBadHeader, sizeof(rawBadHeader) - 1U,
+                                   &parsedRequest, &bodyStart, &bodyOffset),
+                 "ParseHttpRequest rejects malformed header line");
+  SelfTestExpect(state,
+                 !ParseRequestLine("GET noslash HTTP/1.1", &parsedRequest),
+                 "ParseRequestLine rejects non-origin-form target");
 
   HttpRequest badImageIdRequest;
   HttpResponse badImageIdResponse;
@@ -1163,6 +1201,9 @@ bool ParseRequestLine(const char* line, HttpRequest* request) {
       std::strcmp(request->version, "HTTP/1.0") != 0) {
     return false;
   }
+  if (request->target[0] != '/') {
+    return false;
+  }
 
   const char* question = std::strchr(request->target, '?');
   if (question == nullptr) {
@@ -1232,26 +1273,27 @@ bool ParseHttpRequest(unsigned char* raw,
     }
 
     char* colon = std::strchr(cursor, ':');
-    if (colon != nullptr) {
-      *colon = '\0';
-      if (request->headerCount >= MAX_HEADERS) {
-        return false;
-      }
-      if (!CopyString(request->headers[request->headerCount].key,
-                      sizeof(request->headers[request->headerCount].key),
-                      cursor)) {
-        return false;
-      }
-      LowerString(request->headers[request->headerCount].key);
-
-      if (!CopyString(request->headers[request->headerCount].value,
-                      sizeof(request->headers[request->headerCount].value),
-                      colon + 1)) {
-        return false;
-      }
-      TrimInPlace(request->headers[request->headerCount].value);
-      request->headerCount++;
+    if (colon == nullptr || colon == cursor) {
+      return false;
     }
+    *colon = '\0';
+    if (request->headerCount >= MAX_HEADERS) {
+      return false;
+    }
+    if (!CopyString(request->headers[request->headerCount].key,
+                    sizeof(request->headers[request->headerCount].key),
+                    cursor)) {
+      return false;
+    }
+    LowerString(request->headers[request->headerCount].key);
+
+    if (!CopyString(request->headers[request->headerCount].value,
+                    sizeof(request->headers[request->headerCount].value),
+                    colon + 1)) {
+      return false;
+    }
+    TrimInPlace(request->headers[request->headerCount].value);
+    request->headerCount++;
 
     if (lineEnd == nullptr) {
       break;
@@ -3884,10 +3926,15 @@ bool SendResponse(int clientFd, const HttpResponse* response) {
     return false;
   }
 
+  int sendFlags = 0;
+#if defined(MSG_NOSIGNAL)
+  sendFlags = MSG_NOSIGNAL;
+#endif
+
   size_t sent = 0;
   while (sent < header.length) {
     const ssize_t n =
-        send(clientFd, header.data + sent, header.length - sent, 0);
+        send(clientFd, header.data + sent, header.length - sent, sendFlags);
     if (n <= 0) {
       return false;
     }
@@ -3896,8 +3943,8 @@ bool SendResponse(int clientFd, const HttpResponse* response) {
 
   sent = 0;
   while (sent < response->bodyLen) {
-    const ssize_t n =
-        send(clientFd, response->body + sent, response->bodyLen - sent, 0);
+    const ssize_t n = send(clientFd, response->body + sent,
+                           response->bodyLen - sent, sendFlags);
     if (n <= 0) {
       return false;
     }
@@ -4029,6 +4076,7 @@ int main(int argc, char** argv) {
 
   std::signal(SIGINT, SignalHandler);
   std::signal(SIGTERM, SignalHandler);
+  std::signal(SIGPIPE, SIG_IGN);
 
   const int serverFd = socket(AF_INET, SOCK_STREAM, 0);
   if (serverFd < 0) {
