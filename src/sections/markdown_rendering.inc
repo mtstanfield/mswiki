@@ -580,10 +580,7 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
       if (footnoteOrder[i] == 0) {
         continue;
       }
-      if (!BufferAppendFormat(html,
-                              "<li id=\"fn-%s\"><span class=\"meta\">%d."
-                              "</span> ",
-                              footnoteIds[i], footnoteOrder[i])) {
+      if (!BufferAppendFormat(html, "<li id=\"fn-%s\">", footnoteIds[i])) {
         return false;
       }
       if (!BufferAppendEscaped(html, footnoteText[i],

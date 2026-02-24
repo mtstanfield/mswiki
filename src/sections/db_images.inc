@@ -71,19 +71,15 @@ bool DbAppendImagesHtml(sqlite3* db,
       return false;
     }
 
-    if (!BufferAppend(html, "</a> (<code>")) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (!BufferAppendEscaped(html, snippet, std::strlen(snippet))) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (!BufferAppend(html, "</code>) ")) {
+    if (!BufferAppend(html, "</a>")) {
       (void)sqlite3_finalize(stmt);
       return false;
     }
     if (includeInsertButtons) {
+      if (!BufferAppend(html, " ")) {
+        (void)sqlite3_finalize(stmt);
+        return false;
+      }
       if (!BufferAppend(html,
                         "<button type=\"button\" class=\"md-insert-image\" "
                         "data-md-snippet=\"")) {

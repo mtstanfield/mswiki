@@ -750,6 +750,111 @@ bool SetResponseCopy(HttpResponse* response,
                      const char* contentType,
                      const char* body,
                      size_t bodyLen) {
+  if (contentType != nullptr && body != nullptr &&
+      std::strncmp(contentType, "text/html", 9U) == 0) {
+    TextBuffer formatted;
+    formatted.data = reinterpret_cast<char*>(gResponseBuffer);
+    formatted.capacity = sizeof(gResponseBuffer);
+    BufferReset(&formatted);
+
+    bool inRawText = false;
+    size_t i = 0U;
+    while (i < bodyLen) {
+      const char ch = body[i];
+      if (ch != '<') {
+        if (!BufferAppendChar(&formatted, ch)) {
+          return false;
+        }
+        i += 1U;
+        continue;
+      }
+
+      size_t tagEnd = i + 1U;
+      while (tagEnd < bodyLen && body[tagEnd] != '>') {
+        tagEnd += 1U;
+      }
+      if (tagEnd >= bodyLen) {
+        if (!BufferAppendBytes(&formatted, body + i, bodyLen - i)) {
+          return false;
+        }
+        break;
+      }
+
+      if (!BufferAppendBytes(&formatted, body + i, (tagEnd - i) + 1U)) {
+        return false;
+      }
+
+      size_t namePos = i + 1U;
+      bool closingTag = false;
+      if (namePos < tagEnd && body[namePos] == '/') {
+        closingTag = true;
+        namePos += 1U;
+      }
+      while (namePos < tagEnd &&
+             (body[namePos] == ' ' || body[namePos] == '\t' ||
+              body[namePos] == '\r' || body[namePos] == '\n')) {
+        namePos += 1U;
+      }
+
+      char tagName[16];
+      size_t tagNameLen = 0U;
+      while (namePos < tagEnd && tagNameLen + 1U < sizeof(tagName)) {
+        const char current = body[namePos];
+        const bool alphaNumeric =
+            (current >= 'a' && current <= 'z') ||
+            (current >= 'A' && current <= 'Z') ||
+            (current >= '0' && current <= '9') || current == '-' ||
+            current == '_';
+        if (!alphaNumeric) {
+          break;
+        }
+        tagName[tagNameLen] = static_cast<char>(ToLowerAscii(current));
+        tagNameLen += 1U;
+        namePos += 1U;
+      }
+      tagName[tagNameLen] = '\0';
+
+      if (tagNameLen > 0U &&
+          (std::strcmp(tagName, "script") == 0 ||
+           std::strcmp(tagName, "style") == 0)) {
+        if (closingTag) {
+          inRawText = false;
+        } else {
+          bool selfClosing = false;
+          size_t scan = tagEnd;
+          while (scan > i) {
+            scan -= 1U;
+            if (body[scan] == '/') {
+              selfClosing = true;
+              break;
+            }
+            if (body[scan] != ' ' && body[scan] != '\t' && body[scan] != '\r' &&
+                body[scan] != '\n') {
+              break;
+            }
+          }
+          if (!selfClosing) {
+            inRawText = true;
+          }
+        }
+      }
+
+      if (!inRawText) {
+        const size_t next = tagEnd + 1U;
+        if (next < bodyLen && body[next] == '<') {
+          if (!BufferAppendChar(&formatted, '\n')) {
+            return false;
+          }
+        }
+      }
+
+      i = tagEnd + 1U;
+    }
+
+    SetResponse(response, status, contentType, gResponseBuffer, formatted.length);
+    return true;
+  }
+
   if (bodyLen > sizeof(gResponseBuffer)) {
     return false;
   }
@@ -1072,8 +1177,6 @@ bool AppendEditorToolbarHtml(TextBuffer* content) {
       "aria-label=\"List\">List</button>"
       "<button type=\"button\" class=\"md-tool\" data-md-action=\"footnote\" "
       "aria-label=\"Footnote\">Footnote</button>"
-      "<button type=\"button\" class=\"md-tool\" data-md-action=\"image\" "
-      "aria-label=\"Image\">Image</button>"
       "</div>");
 }
 
@@ -1109,8 +1212,7 @@ bool AppendEditorToolbarScript(TextBuffer* content) {
       "quote:{mode:'line-prefix',prefix:'> ',placeholder:'quoted text'},"
       "list:{mode:'line-prefix',prefix:'- ',placeholder:'list item'},"
       "footnote:{mode:'insert',insertText:'[^note]\\\\n\\\\n[^note]: note "
-      "text'},"
-      "image:{mode:'insert',insertText:'![alt text](/image/1)'}};"
+      "text'}};"
       "function applyReplacement(start,end,replacement,cursorPos){"
       "if(typeof editor.setRangeText==='function'){editor.setRangeText("
       "replacement,start,end,'end');}else{var before=editor.value.slice(0,"
