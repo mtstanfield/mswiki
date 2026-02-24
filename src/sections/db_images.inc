@@ -81,7 +81,9 @@ bool DbAppendImagesHtml(sqlite3* db,
         return false;
       }
       if (!BufferAppend(html,
-                        "<button type=\"button\" class=\"md-insert-image\" "
+                        "<button type=\"button\" "
+                        "class=\"action-button button-secondary "
+                        "md-insert-image\" "
                         "data-md-snippet=\"")) {
         (void)sqlite3_finalize(stmt);
         return false;
@@ -109,7 +111,8 @@ bool DbAppendImagesHtml(sqlite3* db,
       }
       if (!BufferAppend(html,
                         "\"><button type=\"submit\" "
-                        "class=\"md-insert-image delete-button\">"
+                        "class=\"action-button delete-button "
+                        "md-insert-image\">"
                         "Delete image</button></form>")) {
         (void)sqlite3_finalize(stmt);
         return false;

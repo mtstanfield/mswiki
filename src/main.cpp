@@ -849,7 +849,11 @@ const char* DetectImageMimeFromData(const unsigned char* data, size_t len) {
 /*
  * Build the common HTML page shell with header/nav around content.
  */
-bool BuildPageLayout(const char* title, const char* content, TextBuffer* out) {
+bool BuildPageLayout(const char* title,
+                     const char* content,
+                     const char* headerLinkHref,
+                     const char* headerLinkLabel,
+                     TextBuffer* out) {
   if (!BufferAppend(out,
                     "<!doctype html>\n"
                     "<html>\n"
@@ -880,10 +884,27 @@ bool BuildPageLayout(const char* title, const char* content, TextBuffer* out) {
   if (!BufferAppend(out,
                     "<strong>mswiki</strong></a><nav>"
                     "<a href=\"/page/home\">Home</a>"
-                    "<a href=\"/pages\">All Pages</a>"
-                    "</nav></div>\n"
-                    "</header>\n"
-                    "<main>\n")) {
+                    "<a href=\"/pages\">All Pages</a>")) {
+    return false;
+  }
+  if (headerLinkHref != nullptr && headerLinkLabel != nullptr) {
+    if (!BufferAppend(out, "<a href=\"")) {
+      return false;
+    }
+    if (!BufferAppend(out, headerLinkHref)) {
+      return false;
+    }
+    if (!BufferAppend(out, "\">")) {
+      return false;
+    }
+    if (!BufferAppendEscaped(out, headerLinkLabel, std::strlen(headerLinkLabel))) {
+      return false;
+    }
+    if (!BufferAppend(out, "</a>")) {
+      return false;
+    }
+  }
+  if (!BufferAppend(out, "</nav></div>\n</header>\n<main>\n")) {
     return false;
   }
   if (!BufferAppend(out, content)) {
@@ -955,11 +976,7 @@ void BuildDefaultCss(TextBuffer* css) {
       ".md-tool:hover{background:#fff;color:var(--accent);border-color:var("
       "--accent);}"
       ".md-tool:focus{outline:2px solid var(--accent);outline-offset:1px;}"
-      ".md-insert-image{margin-left:8px;border:1px solid var(--line);"
-      "border-radius:6px;background:#fff;color:var(--text);padding:5px 10px;"
-      "font-size:.8rem;line-height:1.2;}"
-      ".md-insert-image:hover{background:#fff;color:var(--accent);border-color:"
-      "var(--accent);}"
+      ".md-insert-image{margin-left:8px;}"
       ".delete-button{background:#8a2f2f;border-color:#8a2f2f;color:#fff;}"
       ".delete-button:hover{background:#6f2525;border-color:#6f2525;}"
       ".inline-delete{display:inline-block;margin:0;}"
@@ -1051,7 +1068,7 @@ bool BuildPagesHtml(sqlite3* db,
   }
 
   BufferReset(page);
-  return BuildPageLayout("All Pages", content.data, page);
+  return BuildPageLayout("All Pages", content.data, nullptr, nullptr, page);
 }
 
 /*
@@ -1248,8 +1265,17 @@ bool BuildEditHtml(sqlite3* db,
   if (!BufferAppend(&content,
                     "\"><div class=\"form-actions\"><button type=\"submit\" "
                     "class=\"action-button delete-button\">Delete page</button>"
-                    "</div></form><section class=\"panel\">"
-                    "<h2>Images for this page</h2><p><a href=\"/images/new/")) {
+                    " <a class=\"button-link button-secondary\" href=\"/raw/")) {
+    return false;
+  }
+  if (!BufferAppend(&content, encodedSlug)) {
+    return false;
+  }
+  if (!BufferAppend(&content,
+                    "\">View raw markdown</a></div></form><section "
+                    "class=\"panel\">"
+                    "<h2>Images for this page</h2><p><a class=\"button-link "
+                    "button-secondary\" href=\"/images/new/")) {
     return false;
   }
   if (!BufferAppend(&content, encodedSlug)) {
@@ -1272,7 +1298,7 @@ bool BuildEditHtml(sqlite3* db,
   }
 
   BufferReset(page);
-  return BuildPageLayout("Edit", content.data, page);
+  return BuildPageLayout("Edit", content.data, nullptr, nullptr, page);
 }
 
 /*
@@ -1310,7 +1336,7 @@ bool BuildMissingPageHtml(RequestArena* arena,
   }
 
   BufferReset(page);
-  return BuildPageLayout("Missing Page", content.data, page);
+  return BuildPageLayout("Missing Page", content.data, nullptr, nullptr, page);
 }
 
 /*
@@ -1385,29 +1411,7 @@ bool BuildViewHtml(sqlite3* db,
     return false;
   }
 
-  if (!BufferAppend(&content, "<p><a href=\"/edit/")) {
-    return false;
-  }
-  if (!BufferAppend(&content, encodedSlug)) {
-    return false;
-  }
-  if (!BufferAppend(&content, "\">Edit page</a> | <a href=\"/raw/")) {
-    return false;
-  }
-  if (!BufferAppend(&content, encodedSlug)) {
-    return false;
-  }
-  if (!BufferAppend(&content,
-                    "\">View raw markdown</a> | <a href=\"/images/new/")) {
-    return false;
-  }
-  if (!BufferAppend(&content, encodedSlug)) {
-    return false;
-  }
-  if (!BufferAppend(&content,
-                    "\">Upload image</a> "
-                    "</p>"
-                    "<section class=\"panel\"><h2>Backlinks</h2>")) {
+  if (!BufferAppend(&content, "<section class=\"panel\"><h2>Backlinks</h2>")) {
     return false;
   }
 
@@ -1430,7 +1434,12 @@ bool BuildViewHtml(sqlite3* db,
   }
 
   BufferReset(page);
-  return BuildPageLayout(pageRecord->title, content.data, page);
+  char editPath[MAX_PATH];
+  if (std::snprintf(editPath, sizeof(editPath), "/edit/%s", encodedSlug) < 0) {
+    return false;
+  }
+  return BuildPageLayout(pageRecord->title, content.data, editPath, "Edit page",
+                         page);
 }
 
 /*
@@ -1467,18 +1476,20 @@ bool BuildImageUploadForm(RequestArena* arena,
   if (!BufferAppend(
           &content,
           "\"><input type=\"file\" name=\"image\" accept=\"image/*\" required>"
-          "<br><br><button type=\"submit\">Upload</button> <a href=\"/page/")) {
+          "<br><br><div class=\"form-actions\">"
+          "<button type=\"submit\" class=\"action-button\">Upload</button> "
+          "<a class=\"button-link button-secondary\" href=\"/page/")) {
     return false;
   }
   if (!BufferAppend(&content, encodedSlug)) {
     return false;
   }
-  if (!BufferAppend(&content, "\">Back</a></form></article>")) {
+  if (!BufferAppend(&content, "\">Back</a></div></form></article>")) {
     return false;
   }
 
   BufferReset(page);
-  return BuildPageLayout("Upload Image", content.data, page);
+  return BuildPageLayout("Upload Image", content.data, nullptr, nullptr, page);
 }
 
 /*
@@ -1519,7 +1530,7 @@ bool BuildImageUploadedPage(RequestArena* arena,
   }
 
   BufferReset(page);
-  return BuildPageLayout("Image Uploaded", content.data, page);
+  return BuildPageLayout("Image Uploaded", content.data, nullptr, nullptr, page);
 }
 
 /*
