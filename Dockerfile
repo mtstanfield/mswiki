@@ -25,11 +25,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY . .
 RUN cmake -S . -B fuzz-build -DMSWIKI_FUZZING=ON -DCMAKE_CXX_COMPILER=clang++-14
-RUN cmake --build fuzz-build --target mswiki_http_fuzz -j"$(nproc)"
-RUN mkdir -p /corpus/http_request
+RUN cmake --build fuzz-build --target mswiki_http_fuzz mswiki_markdown_fuzz mswiki_multipart_fuzz -j"$(nproc)"
+RUN mkdir -p /corpus/http_request /corpus/markdown /corpus/multipart \
+    && cp -f /src/fuzz/seeds/http_request/*.bin /corpus/http_request/ \
+    && cp -f /src/fuzz/seeds/markdown/* /corpus/markdown/ \
+    && cp -f /src/fuzz/seeds/multipart/*.bin /corpus/multipart/
 ENV ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:symbolize=1
 ENV UBSAN_OPTIONS=print_stacktrace=1
-ENTRYPOINT ["/src/fuzz-build/mswiki_http_fuzz", "-max_total_time=60", "/corpus/http_request"]
+ENTRYPOINT ["/src/fuzz-build/mswiki_http_fuzz", "-dict=/src/fuzz/http_request.dict", "-max_total_time=60", "/corpus/http_request"]
 
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app

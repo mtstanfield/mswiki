@@ -93,17 +93,47 @@ docker run --rm --platform linux/amd64 -p 8080:8080 -v mswiki-data:/data mswiki:
 Build and run the fuzzing image:
 
 ```sh
-docker build --target fuzz -t mswiki:fuzz .
+docker buildx build --platform linux/amd64 --target fuzz -t mswiki:fuzz --load .
 docker run --rm --platform linux/amd64 mswiki:fuzz
 ```
 
-To keep and reuse a corpus from the host:
+The default fuzz target is HTTP request fuzzing and loads
+`fuzz/http_request.dict`.
+
+The image includes starter seeds in `/corpus/http_request`,
+`/corpus/markdown`, and `/corpus/multipart`.
+
+Run HTTP fuzzing with baked-in corpus:
 
 ```sh
-mkdir -p fuzz-corpus/http_request
+docker run --rm --platform linux/amd64 mswiki:fuzz
+```
+
+Run the markdown renderer fuzz target:
+
+```sh
+docker run --rm --platform linux/amd64 \
+  --entrypoint /src/fuzz-build/mswiki_markdown_fuzz \
+  mswiki:fuzz \
+  -dict=/src/fuzz/markdown.dict -max_total_time=3600 /corpus/markdown
+```
+
+Run the multipart parser fuzz target:
+
+```sh
+docker run --rm --platform linux/amd64 \
+  --entrypoint /src/fuzz-build/mswiki_multipart_fuzz \
+  mswiki:fuzz \
+  -dict=/src/fuzz/multipart.dict -max_total_time=3600 /corpus/multipart
+```
+
+If you want corpus persistence across runs, mount a host corpus directory:
+
+```sh
+mkdir -p fuzz-corpus
+cp -R fuzz/seeds/* fuzz-corpus/
 docker run --rm --platform linux/amd64 -v "$PWD/fuzz-corpus:/corpus" mswiki:fuzz
 ```
-Bind mounts from the host can still be used, but on macOS they may require additional ACL/ownership setup for uid/gid `65532`.
 
 If the container exits immediately, inspect logs:
 

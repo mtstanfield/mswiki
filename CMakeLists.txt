@@ -31,22 +31,30 @@ if (MSWIKI_FUZZING)
     message(FATAL_ERROR "MSWIKI_FUZZING requires clang/clang++")
   endif()
 
-  add_executable(mswiki_http_fuzz src/fuzz_http_request.cpp)
-  target_compile_options(mswiki_http_fuzz PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
-    -Wconversion
-    -Wshadow
-    -fno-exceptions
-    -fno-rtti
-    -O1
-    -g
-    -fno-omit-frame-pointer
-    -fsanitize=fuzzer,address,undefined
-  )
-  target_link_options(mswiki_http_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
-  target_link_libraries(mswiki_http_fuzz PRIVATE sqlite3)
+  function(add_mswiki_fuzz_target target_name source_file)
+    add_executable(${target_name} ${source_file})
+    target_compile_options(${target_name} PRIVATE
+      -Wall
+      -Wextra
+      -Wpedantic
+      -Wconversion
+      -Wshadow
+      -fno-exceptions
+      -fno-rtti
+      -O1
+      -g
+      -fno-omit-frame-pointer
+      -fsanitize=fuzzer,address,undefined
+    )
+    target_link_options(${target_name} PRIVATE
+      -fsanitize=fuzzer,address,undefined
+    )
+    target_link_libraries(${target_name} PRIVATE sqlite3)
+  endfunction()
+
+  add_mswiki_fuzz_target(mswiki_http_fuzz src/fuzz_http_request.cpp)
+  add_mswiki_fuzz_target(mswiki_markdown_fuzz src/fuzz_markdown.cpp)
+  add_mswiki_fuzz_target(mswiki_multipart_fuzz src/fuzz_multipart.cpp)
 endif()
 
 enable_testing()

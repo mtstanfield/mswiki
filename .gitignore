@@ -3,3 +3,4 @@ build/
 fuzz-build/
 mswiki
 FINDINGS.md
+fuzz-corpus/
