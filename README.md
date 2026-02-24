@@ -12,9 +12,7 @@
 - Image uploads stored in SQLite BLOBs
 - Rendered page images are scaled inline as margin figures and open full-size on click
 - Uploaded images can be deleted from the page image list
-- Optional runtime branding from assets directory:
-  - `/data/assets/style.css`
-  - `/data/assets/logo.svg|logo.png|logo.jpg|logo.jpeg|logo.gif`
+- Inline cat emoji favicon (`🐱`) with built-in stylesheet
 - No client-side JavaScript required for core flows
 
 ## Build
@@ -45,7 +43,6 @@ Open [http://localhost:8080](http://localhost:8080).
 - `--listen <addr>`: IPv4 listen address (default `0.0.0.0`)
 - `--port <port>`: port (default `8080`)
 - `--db <path>`: sqlite database path (default `./mswiki.db`)
-- `--assets <dir>`: optional assets directory
 - `--max-body-bytes <bytes>`: maximum accepted request body bytes (default `10485760`)
 - `--self-test`: run the in-process unit/integration self-test suite
 
@@ -91,12 +88,6 @@ Run the amd64 image locally:
 ```sh
 docker volume create mswiki-data
 docker run --rm --platform linux/amd64 -p 8080:8080 -v mswiki-data:/data mswiki:amd64
-```
-
-To keep a single mounted volume while customizing branding, copy files into the volume-backed `assets` directory:
-
-```sh
-docker run --rm -v mswiki-data:/data -v "$PWD/custom-assets:/in:ro" busybox sh -c 'mkdir -p /data/assets && cp -r /in/* /data/assets/'
 ```
 
 Bind mounts from the host can still be used, but on macOS they may require additional ACL/ownership setup for uid/gid `65532`.

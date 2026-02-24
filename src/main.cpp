@@ -35,9 +35,9 @@ static const size_t MAX_FILENAME = 256;
 static const size_t MAX_BODY_BYTES = 10U * 1024U * 1024U;
 static const size_t MAX_REQUEST_BYTES = MAX_BODY_BYTES + 64U * 1024U;
 static const size_t MAX_RESPONSE_BYTES = 1U * 1024U * 1024U;
+static const size_t MAX_REQUEST_ARENA_BYTES = 4U * MAX_RESPONSE_BYTES;
 static const size_t MAX_BINARY_RESPONSE_BYTES = 10U * 1024U * 1024U;
 static const size_t MAX_PAGE_MARKDOWN = 512U * 1024U;
-static const size_t MAX_LOGO_BYTES = 2U * 1024U * 1024U;
 static const size_t MAX_FOOTNOTES = 64U;
 static const size_t MAX_FOOTNOTE_ID = 32U;
 static const size_t MAX_FOOTNOTE_TEXT = 1024U;
@@ -46,7 +46,6 @@ typedef struct {
   char listenHost[64];
   int port;
   char dbPath[512];
-  char assetsPath[512];
   size_t maxBodyBytes;
   bool runSelfTest;
 } Config;
@@ -86,9 +85,16 @@ typedef struct {
 } PageRecord;
 
 typedef struct {
-  char data[MAX_RESPONSE_BYTES];
+  char* data;
   size_t length;
+  size_t capacity;
 } TextBuffer;
+
+typedef struct {
+  unsigned char* storage;
+  size_t capacity;
+  size_t used;
+} RequestArena;
 
 typedef struct {
   char filename[MAX_FILENAME];
@@ -102,6 +108,7 @@ static volatile sig_atomic_t gKeepRunning = 1;
 static unsigned char gRequestBuffer[MAX_REQUEST_BYTES];
 static unsigned char gResponseBuffer[MAX_RESPONSE_BYTES];
 static unsigned char gBinaryBuffer[MAX_BINARY_RESPONSE_BYTES];
+static unsigned char gRequestArenaStorage[MAX_REQUEST_ARENA_BYTES];
 
 bool DbOpen(sqlite3** db, const char* dbPath, char* err, size_t errSize);
 bool DbGetPage(sqlite3* db,
@@ -174,7 +181,7 @@ const unsigned char* FindBytes(const unsigned char* haystack,
                                size_t needleLen);
 const char* DetectImageMimeFromData(const unsigned char* data, size_t len);
 void HandleRequest(sqlite3* db,
-                   const Config* config,
+                   RequestArena* arena,
                    const HttpRequest* request,
                    HttpResponse* response);
 
@@ -188,13 +195,48 @@ void SignalHandler(int) {
 }
 
 /**
+ * Purpose: Initialize or reset a request arena over caller-provided storage.
+ * Inputs: `arena` metadata output; `storage` backing bytes; `capacity` size.
+ * Outputs: No return value; arena is ready for per-request allocations.
+ */
+void ArenaReset(RequestArena* arena, unsigned char* storage, size_t capacity) {
+  arena->storage = storage;
+  arena->capacity = capacity;
+  arena->used = 0U;
+}
+
+/**
+ * Purpose: Allocate one TextBuffer slice from the request arena.
+ * Inputs: `arena` allocator state, `buffer` output handle, requested capacity.
+ * Outputs: Returns true when allocation succeeds and buffer is zeroed.
+ */
+bool ArenaAllocTextBuffer(RequestArena* arena,
+                          TextBuffer* buffer,
+                          size_t capacity) {
+  if (arena == nullptr || buffer == nullptr || arena->storage == nullptr) {
+    return false;
+  }
+  if (capacity == 0U || capacity > arena->capacity - arena->used) {
+    return false;
+  }
+  buffer->data = reinterpret_cast<char*>(arena->storage + arena->used);
+  buffer->capacity = capacity;
+  buffer->length = 0U;
+  buffer->data[0] = '\0';
+  arena->used += capacity;
+  return true;
+}
+
+/**
  * Purpose: Reset a TextBuffer to an empty C string.
  * Inputs: `buffer` must be non-null and writable.
  * Outputs: No return value; length is set to 0 and data[0] becomes '\\0'.
  */
 void BufferReset(TextBuffer* buffer) {
   buffer->length = 0;
-  buffer->data[0] = '\0';
+  if (buffer->capacity > 0U && buffer->data != nullptr) {
+    buffer->data[0] = '\0';
+  }
 }
 
 /**
@@ -204,7 +246,7 @@ void BufferReset(TextBuffer* buffer) {
  * capacity.
  */
 bool BufferAppendBytes(TextBuffer* buffer, const char* text, size_t len) {
-  if (buffer->length + len + 1U > sizeof(buffer->data)) {
+  if (buffer->length + len + 1U > buffer->capacity) {
     return false;
   }
   (void)std::memcpy(buffer->data + buffer->length, text, len);
@@ -228,7 +270,7 @@ bool BufferAppend(TextBuffer* buffer, const char* text) {
  * Outputs: Returns true on success; false if buffer is full.
  */
 bool BufferAppendChar(TextBuffer* buffer, char ch) {
-  if (buffer->length + 2U > sizeof(buffer->data)) {
+  if (buffer->length + 2U > buffer->capacity) {
     return false;
   }
   buffer->data[buffer->length] = ch;
@@ -246,7 +288,7 @@ bool BufferAppendChar(TextBuffer* buffer, char ch) {
 bool BufferAppendFormat(TextBuffer* buffer, const char* format, ...) {
   va_list args;
   va_start(args, format);
-  const size_t remaining = sizeof(buffer->data) - buffer->length;
+  const size_t remaining = buffer->capacity - buffer->length;
   const int count =
       std::vsnprintf(buffer->data + buffer->length, remaining, format, args);
   va_end(args);
@@ -741,6 +783,8 @@ typedef enum {
   ARG_PARSE_ERROR = 2
 } ArgParseResult;
 
+ArgParseResult ParseArgs(int argc, char** argv, Config* config);
+
 typedef struct {
   int passed;
   int failed;
@@ -832,8 +876,14 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
   SelfTestExpect(state, std::strcmp(links[0], "target-page") == 0,
                  "ExtractWikiLinks slugifies");
 
+  static unsigned char arenaStorage[MAX_RESPONSE_BYTES];
+  RequestArena arena;
+  ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
   TextBuffer html;
-  BufferReset(&html);
+  if (!ArenaAllocTextBuffer(&arena, &html, MAX_RESPONSE_BYTES)) {
+    SelfTestExpect(state, false, "RenderMarkdownToHtml arena alloc");
+    return;
+  }
   const bool rendered = RenderMarkdownToHtml(
       "# Title\nWiki [[Other Page|Label]][^n]\n"
       "![Side Image](/image/7)\n"
@@ -950,8 +1000,16 @@ void SelfTestDatabase(SelfTestState* state) {
   SelfTestExpect(state, std::strcmp(page.title, "Home") == 0,
                  "DbGetPage title");
 
+  static unsigned char arenaStorage[MAX_RESPONSE_BYTES];
+  RequestArena arena;
+  ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
   TextBuffer backlinksHtml;
-  BufferReset(&backlinksHtml);
+  if (!ArenaAllocTextBuffer(&arena, &backlinksHtml, MAX_RESPONSE_BYTES)) {
+    SelfTestExpect(state, false, "DbAppendBacklinksHtml arena alloc");
+    (void)sqlite3_close(db);
+    (void)unlink(dbPath);
+    return;
+  }
   const bool backlinksOk =
       DbAppendBacklinksHtml(db, "other", &backlinksHtml, err, sizeof(err));
   SelfTestExpect(state, backlinksOk, "DbAppendBacklinksHtml call");
@@ -1040,31 +1098,30 @@ void SelfTestHttpHandler(SelfTestState* state) {
     return;
   }
 
-  Config config;
-  (void)CopyString(config.listenHost, sizeof(config.listenHost), "127.0.0.1");
-  config.port = 8080;
-  (void)CopyString(config.dbPath, sizeof(config.dbPath), ":memory:");
-  config.assetsPath[0] = '\0';
-  config.maxBodyBytes = MAX_BODY_BYTES;
-  config.runSelfTest = false;
+  RequestArena arena;
 
   HttpRequest request;
   HttpResponse response;
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
   (void)CopyString(request.path, sizeof(request.path), "/page/home");
-  HandleRequest(db, &config, &request, &response);
+  HandleRequest(db, &arena, &request, &response);
   SelfTestExpect(state, response.status == 200, "HandleRequest GET /page/home");
   SelfTestExpect(state, response.bodyLen > 0U, "HandleRequest body exists");
   SelfTestExpect(state,
                  std::strstr(reinterpret_cast<const char*>(response.body),
                              "Create this page") != nullptr,
                  "Missing page response content");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "rel=\"icon\" href=\"data:image/svg+xml") != nullptr,
+      "Page layout includes inline favicon");
 
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
   (void)CopyString(request.path, sizeof(request.path), "/pages");
-  HandleRequest(db, &config, &request, &response);
+  HandleRequest(db, &arena, &request, &response);
   SelfTestExpect(state, response.status == 200, "HandleRequest GET /pages");
   SelfTestExpect(state,
                  std::strstr(reinterpret_cast<const char*>(response.body),
@@ -1074,7 +1131,7 @@ void SelfTestHttpHandler(SelfTestState* state) {
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
   (void)CopyString(request.path, sizeof(request.path), "/edit/home");
-  HandleRequest(db, &config, &request, &response);
+  HandleRequest(db, &arena, &request, &response);
   SelfTestExpect(state, response.status == 200, "HandleRequest GET /edit/home");
   SelfTestExpect(state,
                  std::strstr(reinterpret_cast<const char*>(response.body),
@@ -1095,7 +1152,7 @@ void SelfTestHttpHandler(SelfTestState* state) {
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
   (void)CopyString(request.path, sizeof(request.path), "/page/home");
-  HandleRequest(db, &config, &request, &response);
+  HandleRequest(db, &arena, &request, &response);
   static const unsigned char DELETE_PAGE_TEXT[] = "Delete page";
   static const unsigned char DELETE_IMAGE_ROUTE[] = "/images/delete/";
   SelfTestExpect(state,
@@ -1109,7 +1166,7 @@ void SelfTestHttpHandler(SelfTestState* state) {
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "POST");
   (void)CopyString(request.path, sizeof(request.path), "/delete/home");
-  HandleRequest(db, &config, &request, &response);
+  HandleRequest(db, &arena, &request, &response);
   SelfTestExpect(state, response.status == 302,
                  "HandleRequest POST /delete/home");
   SelfTestExpect(state, std::strcmp(response.location, "/pages") == 0,
@@ -1117,7 +1174,7 @@ void SelfTestHttpHandler(SelfTestState* state) {
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
   (void)CopyString(request.path, sizeof(request.path), "/page/home");
-  HandleRequest(db, &config, &request, &response);
+  HandleRequest(db, &arena, &request, &response);
   SelfTestExpect(state,
                  std::strstr(reinterpret_cast<const char*>(response.body),
                              "Create this page") != nullptr,
@@ -1125,7 +1182,7 @@ void SelfTestHttpHandler(SelfTestState* state) {
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "POST");
   (void)CopyString(request.path, sizeof(request.path), "/delete/%00");
-  HandleRequest(db, &config, &request, &response);
+  HandleRequest(db, &arena, &request, &response);
   SelfTestExpect(state, response.status == 400,
                  "HandleRequest rejects encoded-NUL slug");
 
@@ -1173,7 +1230,7 @@ void SelfTestHttpHandler(SelfTestState* state) {
                    "GET");
   (void)CopyString(badImageIdRequest.path, sizeof(badImageIdRequest.path),
                    "/image/1abc");
-  HandleRequest(db, &config, &badImageIdRequest, &badImageIdResponse);
+  HandleRequest(db, &arena, &badImageIdRequest, &badImageIdResponse);
   SelfTestExpect(state, badImageIdResponse.status == 400,
                  "HandleRequest rejects /image suffix garbage");
 
@@ -1184,9 +1241,18 @@ void SelfTestHttpHandler(SelfTestState* state) {
                    "POST");
   (void)CopyString(badDeleteIdRequest.path, sizeof(badDeleteIdRequest.path),
                    "/images/delete/1abc/home");
-  HandleRequest(db, &config, &badDeleteIdRequest, &badDeleteIdResponse);
+  HandleRequest(db, &arena, &badDeleteIdRequest, &badDeleteIdResponse);
   SelfTestExpect(state, badDeleteIdResponse.status == 400,
                  "HandleRequest rejects /images/delete suffix garbage");
+
+  HttpRequest logoRequest;
+  HttpResponse logoResponse;
+  (void)std::memset(&logoRequest, 0, sizeof(logoRequest));
+  (void)CopyString(logoRequest.method, sizeof(logoRequest.method), "GET");
+  (void)CopyString(logoRequest.path, sizeof(logoRequest.path), "/logo");
+  HandleRequest(db, &arena, &logoRequest, &logoResponse);
+  SelfTestExpect(state, logoResponse.status == 404,
+                 "HandleRequest no longer serves /logo");
 
   (void)sqlite3_close(db);
 }
@@ -1266,6 +1332,41 @@ void SelfTestSocketRequestValidation(SelfTestState* state) {
 }
 
 /**
+ * Purpose: Verify command-line parsing accepts supported flags and rejects
+ * removed/unknown flags.
+ * Inputs: `state` writable aggregate test counters.
+ * Outputs: No return value; appends pass/fail results into `state`.
+ */
+void SelfTestParseArgs(SelfTestState* state) {
+  Config config;
+
+  char progName[] = "mswiki";
+  char dbFlag[] = "--db";
+  char dbPath[] = "/tmp/wiki.db";
+  char maxBodyFlag[] = "--max-body-bytes";
+  char maxBodyValue[] = "1024";
+  char* validArgv[] = {progName, dbFlag, dbPath, maxBodyFlag, maxBodyValue};
+  const ArgParseResult validResult =
+      ParseArgs(static_cast<int>(sizeof(validArgv) / sizeof(validArgv[0])),
+                validArgv, &config);
+  SelfTestExpect(state, validResult == ARG_PARSE_OK,
+                 "ParseArgs accepts supported flags");
+  SelfTestExpect(state, std::strcmp(config.dbPath, "/tmp/wiki.db") == 0,
+                 "ParseArgs sets db path");
+  SelfTestExpect(state, config.maxBodyBytes == 1024U,
+                 "ParseArgs sets max body size");
+
+  char removedFlag[] = "--assets";
+  char removedValue[] = "/tmp/assets";
+  char* removedArgv[] = {progName, removedFlag, removedValue};
+  const ArgParseResult removedResult =
+      ParseArgs(static_cast<int>(sizeof(removedArgv) / sizeof(removedArgv[0])),
+                removedArgv, &config);
+  SelfTestExpect(state, removedResult == ARG_PARSE_ERROR,
+                 "ParseArgs rejects removed --assets flag");
+}
+
+/**
  * Purpose: Run full built-in self-test suite and print aggregate result.
  * Inputs: No function arguments.
  * Outputs: Returns 0 when all tests pass; 1 when any test fails.
@@ -1281,6 +1382,7 @@ int RunSelfTests() {
   SelfTestDatabase(&state);
   SelfTestHttpHandler(&state);
   SelfTestSocketRequestValidation(&state);
+  SelfTestParseArgs(&state);
 
   std::printf("Self-test results: passed=%d failed=%d\n", state.passed,
               state.failed);
@@ -3146,38 +3248,6 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
 }
 
 /**
- * Purpose: Infer MIME type from filename extension for static asset serving.
- * Inputs: `filename` C string, typically asset path or uploaded filename.
- * Outputs: Returns static MIME string; defaults to `application/octet-stream`.
- */
-const char* DetectMimeType(const char* filename) {
-  const char* dot = std::strrchr(filename, '.');
-  if (dot == nullptr) {
-    return "application/octet-stream";
-  }
-  dot++;
-  if (strcasecmp(dot, "css") == 0) {
-    return "text/css; charset=utf-8";
-  }
-  if (strcasecmp(dot, "svg") == 0) {
-    return "image/svg+xml";
-  }
-  if (strcasecmp(dot, "png") == 0) {
-    return "image/png";
-  }
-  if (strcasecmp(dot, "jpg") == 0 || strcasecmp(dot, "jpeg") == 0) {
-    return "image/jpeg";
-  }
-  if (strcasecmp(dot, "gif") == 0) {
-    return "image/gif";
-  }
-  if (strcasecmp(dot, "webp") == 0) {
-    return "image/webp";
-  }
-  return "application/octet-stream";
-}
-
-/**
  * Purpose: Identify image MIME from binary signatures (magic bytes).
  * Inputs: `data` pointer to file bytes and `len` byte count.
  * Outputs: Returns known image MIME string or null when unknown/invalid.
@@ -3206,83 +3276,11 @@ const char* DetectImageMimeFromData(const unsigned char* data, size_t len) {
 }
 
 /**
- * Purpose: Read a whole file into a bounded memory buffer.
- * Inputs: `path` source file; `dst/dstSize` writable destination; `outLen`
- * result. Outputs: Returns true on successful read; false on open/read failure.
- */
-bool ReadFile(const char* path,
-              unsigned char* dst,
-              size_t dstSize,
-              size_t* outLen) {
-  *outLen = 0;
-  const int fd = open(path, O_RDONLY);
-  if (fd < 0) {
-    return false;
-  }
-
-  while (*outLen < dstSize) {
-    const ssize_t n = read(fd, dst + *outLen, dstSize - *outLen);
-    if (n < 0) {
-      (void)close(fd);
-      return false;
-    }
-    if (n == 0) {
-      break;
-    }
-    *outLen += static_cast<size_t>(n);
-  }
-
-  if (*outLen == dstSize) {
-    unsigned char extra = 0U;
-    const ssize_t extraRead = read(fd, &extra, 1U);
-    if (extraRead != 0) {
-      (void)close(fd);
-      return false;
-    }
-  }
-
-  (void)close(fd);
-  return true;
-}
-
-/**
- * Purpose: Find first existing logo asset in configured assets directory.
- * Inputs: `config` with optional assets path; `path/pathSize` writable output.
- * Outputs: Returns true and writes file path when logo exists; false otherwise.
- */
-bool FindLogo(const Config* config, char* path, size_t pathSize) {
-  if (config->assetsPath[0] == '\0') {
-    return false;
-  }
-
-  static const char* NAMES[] = {"logo.svg", "logo.png", "logo.jpg", "logo.jpeg",
-                                "logo.gif"};
-  for (size_t i = 0; i < 5U; i++) {
-    if (std::snprintf(path, pathSize, "%s/%s", config->assetsPath, NAMES[i]) <
-        0) {
-      continue;
-    }
-    struct stat st;
-    if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-/**
  * Purpose: Build the common HTML page shell with header/nav around content.
- * Inputs: config for branding assets, page title, content HTML, output buffer.
+ * Inputs: page title, content HTML, output buffer.
  * Outputs: true on successful HTML construction; false on buffer overflow.
  */
-bool BuildPageLayout(const Config* config,
-                     const char* title,
-                     const char* content,
-                     TextBuffer* out) {
-  char logoPath[768];
-  const bool hasLogo = FindLogo(config, logoPath, sizeof(logoPath));
-
+bool BuildPageLayout(const char* title, const char* content, TextBuffer* out) {
   if (!BufferAppend(out,
                     "<!doctype html><html><head><meta charset=\"utf-8\">"
                     "<meta name=\"viewport\" "
@@ -3295,15 +3293,14 @@ bool BuildPageLayout(const Config* config,
   }
   if (!BufferAppend(out,
                     " - mswiki</title>"
+                    "<link rel=\"icon\" href=\"data:image/svg+xml,%3Csvg%20"
+                    "xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20"
+                    "100%20100'%3E%3Ctext%20y='.9em'%20font-size='90'%3E%F0"
+                    "%9F%90%B1%3C/text%3E%3C/svg%3E\">"
                     "<link rel=\"stylesheet\" href=\"/style.css\"></head><body>"
                     "<header><div class=\"header-inner\"><a class=\"brand\" "
                     "href=\"/page/home\">")) {
     return false;
-  }
-  if (hasLogo) {
-    if (!BufferAppend(out, "<img src=\"/logo\" alt=\"logo\">")) {
-      return false;
-    }
   }
   if (!BufferAppend(out,
                     "<strong>mswiki</strong></a><nav>"
@@ -3427,16 +3424,19 @@ void BuildDefaultCss(TextBuffer* css) {
 
 /**
  * Purpose: Render the "all pages" listing document.
- * Inputs: db handle, runtime config, output page buffer, error buffer.
+ * Inputs: db handle, request arena, output page buffer, error buffer.
  * Outputs: true on success; false on query/render failures.
  */
 bool BuildPagesHtml(sqlite3* db,
-                    const Config* config,
+                    RequestArena* arena,
                     TextBuffer* page,
                     char* err,
                     size_t errSize) {
   TextBuffer content;
-  BufferReset(&content);
+  if (!ArenaAllocTextBuffer(arena, &content, MAX_RESPONSE_BYTES)) {
+    (void)std::snprintf(err, errSize, "response arena exhausted");
+    return false;
+  }
 
   if (!BufferAppend(&content,
                     "<article><h1>All Pages</h1>"
@@ -3447,7 +3447,10 @@ bool BuildPagesHtml(sqlite3* db,
   }
 
   TextBuffer items;
-  BufferReset(&items);
+  if (!ArenaAllocTextBuffer(arena, &items, MAX_RESPONSE_BYTES)) {
+    (void)std::snprintf(err, errSize, "response arena exhausted");
+    return false;
+  }
   if (!DbListPagesHtml(db, &items, err, errSize)) {
     return false;
   }
@@ -3475,7 +3478,7 @@ bool BuildPagesHtml(sqlite3* db,
   }
 
   BufferReset(page);
-  return BuildPageLayout(config, "All Pages", content.data, page);
+  return BuildPageLayout("All Pages", content.data, page);
 }
 
 /**
@@ -3592,13 +3595,13 @@ bool AppendEditorToolbarScript(TextBuffer* content) {
 
 /**
  * Purpose: Render the page editor form for create/update operations.
- * Inputs: config/db handles, slug, current title/markdown values, output page
- * buffer, and error buffer for DB-derived image section failures.
+ * Inputs: db handle, request arena, slug, current title/markdown values,
+ * output page buffer, and error buffer for DB-derived image section failures.
  * Outputs: true on success; false when rendered content exceeds limits or image
  * list query/rendering fails.
  */
-bool BuildEditHtml(const Config* config,
-                   sqlite3* db,
+bool BuildEditHtml(sqlite3* db,
+                   RequestArena* arena,
                    const char* slug,
                    const char* title,
                    const char* markdown,
@@ -3606,7 +3609,10 @@ bool BuildEditHtml(const Config* config,
                    char* err,
                    size_t errSize) {
   TextBuffer content;
-  BufferReset(&content);
+  if (!ArenaAllocTextBuffer(arena, &content, MAX_RESPONSE_BYTES)) {
+    (void)std::snprintf(err, errSize, "response arena exhausted");
+    return false;
+  }
 
   char encodedSlug[MAX_PATH];
   if (!UrlEncode(slug, encodedSlug, sizeof(encodedSlug))) {
@@ -3704,19 +3710,21 @@ bool BuildEditHtml(const Config* config,
   }
 
   BufferReset(page);
-  return BuildPageLayout(config, "Edit", content.data, page);
+  return BuildPageLayout("Edit", content.data, page);
 }
 
 /**
  * Purpose: Render placeholder page for a missing slug with create link.
- * Inputs: config, missing slug, output page buffer.
+ * Inputs: request arena, missing slug, output page buffer.
  * Outputs: true on success; false on buffer overflow while composing HTML.
  */
-bool BuildMissingPageHtml(const Config* config,
+bool BuildMissingPageHtml(RequestArena* arena,
                           const char* slug,
                           TextBuffer* page) {
   TextBuffer content;
-  BufferReset(&content);
+  if (!ArenaAllocTextBuffer(arena, &content, MAX_RESPONSE_BYTES)) {
+    return false;
+  }
 
   char encodedSlug[MAX_PATH];
   if (!UrlEncode(slug, encodedSlug, sizeof(encodedSlug))) {
@@ -3742,30 +3750,36 @@ bool BuildMissingPageHtml(const Config* config,
   }
 
   BufferReset(page);
-  return BuildPageLayout(config, "Missing Page", content.data, page);
+  return BuildPageLayout("Missing Page", content.data, page);
 }
 
 /**
  * Purpose: Render full page view including metadata, backlinks, and images.
- * Inputs: db handle, config, loaded page record, output page buffer, error
- * buffer.
+ * Inputs: db handle, request arena, loaded page record, output page buffer,
+ * error buffer.
  * Outputs: true on success; false on markdown/db/render failures.
  */
 bool BuildViewHtml(sqlite3* db,
-                   const Config* config,
+                   RequestArena* arena,
                    const PageRecord* pageRecord,
                    TextBuffer* page,
                    char* err,
                    size_t errSize) {
   TextBuffer markdownHtml;
-  BufferReset(&markdownHtml);
+  if (!ArenaAllocTextBuffer(arena, &markdownHtml, MAX_RESPONSE_BYTES)) {
+    (void)std::snprintf(err, errSize, "response arena exhausted");
+    return false;
+  }
   if (!RenderMarkdownToHtml(pageRecord->markdown, &markdownHtml)) {
     (void)std::snprintf(err, errSize, "markdown render overflow");
     return false;
   }
 
   TextBuffer content;
-  BufferReset(&content);
+  if (!ArenaAllocTextBuffer(arena, &content, MAX_RESPONSE_BYTES)) {
+    (void)std::snprintf(err, errSize, "response arena exhausted");
+    return false;
+  }
   char encodedSlug[MAX_PATH];
   if (!UrlEncode(pageRecord->slug, encodedSlug, sizeof(encodedSlug))) {
     (void)std::snprintf(err, errSize, "slug encode failed");
@@ -3859,19 +3873,21 @@ bool BuildViewHtml(sqlite3* db,
   }
 
   BufferReset(page);
-  return BuildPageLayout(config, pageRecord->title, content.data, page);
+  return BuildPageLayout(pageRecord->title, content.data, page);
 }
 
 /**
  * Purpose: Render the image upload form for a page slug.
- * Inputs: config, slug, output page buffer.
+ * Inputs: request arena, slug, output page buffer.
  * Outputs: true on success; false on buffer overflow.
  */
-bool BuildImageUploadForm(const Config* config,
+bool BuildImageUploadForm(RequestArena* arena,
                           const char* slug,
                           TextBuffer* page) {
   TextBuffer content;
-  BufferReset(&content);
+  if (!ArenaAllocTextBuffer(arena, &content, MAX_RESPONSE_BYTES)) {
+    return false;
+  }
 
   char encodedSlug[MAX_PATH];
   if (!UrlEncode(slug, encodedSlug, sizeof(encodedSlug))) {
@@ -3907,21 +3923,24 @@ bool BuildImageUploadForm(const Config* config,
   }
 
   BufferReset(page);
-  return BuildPageLayout(config, "Upload Image", content.data, page);
+  return BuildPageLayout("Upload Image", content.data, page);
 }
 
 /**
  * Purpose: Render upload-success page showing markdown embed syntax.
- * Inputs: config, page slug, original filename, image id, output page buffer.
+ * Inputs: request arena, page slug, original filename, image id, output page
+ * buffer.
  * Outputs: true on success; false on buffer overflow while composing HTML.
  */
-bool BuildImageUploadedPage(const Config* config,
+bool BuildImageUploadedPage(RequestArena* arena,
                             const char* slug,
                             const char* filename,
                             int imageId,
                             TextBuffer* page) {
   TextBuffer content;
-  BufferReset(&content);
+  if (!ArenaAllocTextBuffer(arena, &content, MAX_RESPONSE_BYTES)) {
+    return false;
+  }
 
   char encodedSlug[MAX_PATH];
   if (!UrlEncode(slug, encodedSlug, sizeof(encodedSlug))) {
@@ -3948,54 +3967,30 @@ bool BuildImageUploadedPage(const Config* config,
   }
 
   BufferReset(page);
-  return BuildPageLayout(config, "Image Uploaded", content.data, page);
+  return BuildPageLayout("Image Uploaded", content.data, page);
 }
 
 /**
- * Purpose: Build final stylesheet by combining defaults and optional custom
- * file. Inputs: `config` runtime settings; `css` writable output buffer.
- * Outputs: Returns true when style output is built; false only on buffer
- * overflow.
+ * Purpose: Build final stylesheet content.
+ * Inputs: `css` writable output buffer.
+ * Outputs: No return value; writes built-in stylesheet into `css`.
  */
-bool BuildStyleCss(const Config* config, TextBuffer* css) {
+void BuildStyleCss(TextBuffer* css) {
   BufferReset(css);
   BuildDefaultCss(css);
-
-  if (config->assetsPath[0] == '\0') {
-    return true;
-  }
-
-  char path[768];
-  if (std::snprintf(path, sizeof(path), "%s/style.css", config->assetsPath) <
-      0) {
-    return true;
-  }
-
-  size_t fileLen = 0;
-  if (!ReadFile(path, gBinaryBuffer, sizeof(gBinaryBuffer) - 1U, &fileLen)) {
-    return true;
-  }
-
-  gBinaryBuffer[fileLen] = '\0';
-  if (!BufferAppend(css, "\n/* custom style.css */\n")) {
-    return false;
-  }
-  if (!BufferAppend(css, reinterpret_cast<const char*>(gBinaryBuffer))) {
-    return false;
-  }
-
-  return true;
 }
 
 /**
  * Purpose: Execute routing and produce an HTTP response for one request.
- * Inputs: db handle, runtime config, parsed request, response output pointer.
+ * Inputs: db handle, request arena, parsed request, response output pointer.
  * Outputs: No return value; response is populated with status/body/headers.
  */
 void HandleRequest(sqlite3* db,
-                   const Config* config,
+                   RequestArena* arena,
                    const HttpRequest* request,
                    HttpResponse* response) {
+  ArenaReset(arena, gRequestArenaStorage, sizeof(gRequestArenaStorage));
+
   if (std::strcmp(request->method, "GET") == 0 &&
       std::strcmp(request->path, "/healthz") == 0) {
     static const char BODY[] = "ok";
@@ -4014,10 +4009,11 @@ void HandleRequest(sqlite3* db,
   if (std::strcmp(request->method, "GET") == 0 &&
       std::strcmp(request->path, "/style.css") == 0) {
     TextBuffer css;
-    if (!BuildStyleCss(config, &css)) {
-      SetError(response, 500, "Failed to build CSS");
+    if (!ArenaAllocTextBuffer(arena, &css, MAX_RESPONSE_BYTES)) {
+      SetError(response, 500, "Response arena exhausted");
       return;
     }
+    BuildStyleCss(&css);
     if (!SetResponseCopy(response, 200, "text/css; charset=utf-8", css.data,
                          css.length)) {
       SetError(response, 500, "CSS response too large");
@@ -4026,27 +4022,14 @@ void HandleRequest(sqlite3* db,
   }
 
   if (std::strcmp(request->method, "GET") == 0 &&
-      std::strcmp(request->path, "/logo") == 0) {
-    char logoPath[768];
-    if (!FindLogo(config, logoPath, sizeof(logoPath))) {
-      SetError(response, 404, "Logo not found");
-      return;
-    }
-    size_t logoLen = 0;
-    if (!ReadFile(logoPath, gBinaryBuffer, MAX_LOGO_BYTES, &logoLen)) {
-      SetError(response, 404, "Logo not found");
-      return;
-    }
-    SetResponse(response, 200, DetectMimeType(logoPath), gBinaryBuffer,
-                logoLen);
-    return;
-  }
-
-  if (std::strcmp(request->method, "GET") == 0 &&
       std::strcmp(request->path, "/pages") == 0) {
     TextBuffer html;
     char err[256];
-    if (!BuildPagesHtml(db, config, &html, err, sizeof(err))) {
+    if (!ArenaAllocTextBuffer(arena, &html, MAX_RESPONSE_BYTES)) {
+      SetError(response, 500, "Response arena exhausted");
+      return;
+    }
+    if (!BuildPagesHtml(db, arena, &html, err, sizeof(err))) {
       SetError(response, 500, err);
       return;
     }
@@ -4143,9 +4126,13 @@ void HandleRequest(sqlite3* db,
     }
 
     TextBuffer html;
+    if (!ArenaAllocTextBuffer(arena, &html, MAX_RESPONSE_BYTES)) {
+      SetError(response, 500, "Response arena exhausted");
+      return;
+    }
     if (found) {
-      if (!BuildEditHtml(config, db, slug, pageRecord.title,
-                         pageRecord.markdown, &html, err, sizeof(err))) {
+      if (!BuildEditHtml(db, arena, slug, pageRecord.title, pageRecord.markdown,
+                         &html, err, sizeof(err))) {
         SetError(response, 500, "Failed to build edit page");
         return;
       }
@@ -4153,7 +4140,7 @@ void HandleRequest(sqlite3* db,
       char defaultMarkdown[1024];
       (void)std::snprintf(defaultMarkdown, sizeof(defaultMarkdown), "# %s\n",
                           slug);
-      if (!BuildEditHtml(config, db, slug, slug, defaultMarkdown, &html, err,
+      if (!BuildEditHtml(db, arena, slug, slug, defaultMarkdown, &html, err,
                          sizeof(err))) {
         SetError(response, 500, "Failed to build edit page");
         return;
@@ -4238,7 +4225,11 @@ void HandleRequest(sqlite3* db,
     }
 
     TextBuffer html;
-    if (!BuildImageUploadForm(config, slug, &html)) {
+    if (!ArenaAllocTextBuffer(arena, &html, MAX_RESPONSE_BYTES)) {
+      SetError(response, 500, "Response arena exhausted");
+      return;
+    }
+    if (!BuildImageUploadForm(arena, slug, &html)) {
       SetError(response, 500, "Failed to build image upload form");
       return;
     }
@@ -4281,7 +4272,11 @@ void HandleRequest(sqlite3* db,
     }
 
     TextBuffer html;
-    if (!BuildImageUploadedPage(config, slug, image.filename, imageId, &html)) {
+    if (!ArenaAllocTextBuffer(arena, &html, MAX_RESPONSE_BYTES)) {
+      SetError(response, 500, "Response arena exhausted");
+      return;
+    }
+    if (!BuildImageUploadedPage(arena, slug, image.filename, imageId, &html)) {
       SetError(response, 500, "Failed to build success page");
       return;
     }
@@ -4355,13 +4350,17 @@ void HandleRequest(sqlite3* db,
     }
 
     TextBuffer html;
+    if (!ArenaAllocTextBuffer(arena, &html, MAX_RESPONSE_BYTES)) {
+      SetError(response, 500, "Response arena exhausted");
+      return;
+    }
     if (!found) {
-      if (!BuildMissingPageHtml(config, slug, &html)) {
+      if (!BuildMissingPageHtml(arena, slug, &html)) {
         SetError(response, 500, "Failed to build missing page");
         return;
       }
     } else {
-      if (!BuildViewHtml(db, config, &pageRecord, &html, err, sizeof(err))) {
+      if (!BuildViewHtml(db, arena, &pageRecord, &html, err, sizeof(err))) {
         SetError(response, 500, err);
         return;
       }
@@ -4391,6 +4390,9 @@ void HandleRequest(sqlite3* db,
  */
 bool SendResponse(int clientFd, const HttpResponse* response) {
   TextBuffer header;
+  char headerData[4096];
+  header.data = headerData;
+  header.capacity = sizeof(headerData);
   BufferReset(&header);
 
   if (!BufferAppendFormat(&header, "HTTP/1.1 %d %s\r\n", response->status,
@@ -4458,8 +4460,6 @@ void PrintUsage() {
   std::printf(
       "  --db <path>                SQLite database path (default: "
       "./mswiki.db)\n");
-  std::printf(
-      "  --assets <dir>             Optional customization directory\n");
   std::printf("  --max-body-bytes <bytes>   Maximum request body size\n");
   std::printf("  --self-test                Run in-process test suite\n");
   std::printf("  --help                     Show this help\n");
@@ -4474,7 +4474,6 @@ ArgParseResult ParseArgs(int argc, char** argv, Config* config) {
   (void)CopyString(config->listenHost, sizeof(config->listenHost), "0.0.0.0");
   config->port = DEFAULT_PORT;
   (void)CopyString(config->dbPath, sizeof(config->dbPath), "./mswiki.db");
-  config->assetsPath[0] = '\0';
   config->maxBodyBytes = MAX_BODY_BYTES;
   config->runSelfTest = false;
 
@@ -4517,11 +4516,6 @@ ArgParseResult ParseArgs(int argc, char** argv, Config* config) {
     } else if (std::strcmp(arg, "--db") == 0) {
       if (!CopyString(config->dbPath, sizeof(config->dbPath), value)) {
         std::fprintf(stderr, "db path too long\n");
-        return ARG_PARSE_ERROR;
-      }
-    } else if (std::strcmp(arg, "--assets") == 0) {
-      if (!CopyString(config->assetsPath, sizeof(config->assetsPath), value)) {
-        std::fprintf(stderr, "assets path too long\n");
         return ARG_PARSE_ERROR;
       }
     } else if (std::strcmp(arg, "--max-body-bytes") == 0) {
@@ -4668,7 +4662,8 @@ int main(int argc, char** argv) {
       continue;
     }
 
-    HandleRequest(db, &config, &request, &response);
+    RequestArena arena;
+    HandleRequest(db, &arena, &request, &response);
     (void)SendResponse(clientFd, &response);
     (void)close(clientFd);
   }
