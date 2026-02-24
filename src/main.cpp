@@ -128,12 +128,19 @@ void ExtractWikiLinks(const char* markdown,
                       char links[][MAX_SLUG],
                       size_t* linkCount,
                       size_t maxLinks);
+bool DbListPagesHtml(sqlite3* db, TextBuffer* html, char* err, size_t errSize);
 bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html);
 bool DbAppendBacklinksHtml(sqlite3* db,
                            const char* slug,
                            TextBuffer* html,
                            char* err,
                            size_t errSize);
+bool DbAppendImagesHtml(sqlite3* db,
+                        const char* slug,
+                        TextBuffer* html,
+                        bool includeInsertButtons,
+                        char* err,
+                        size_t errSize);
 bool DbInsertImage(sqlite3* db,
                    const char* pageSlug,
                    const char* filename,
@@ -185,19 +192,15 @@ void HandleRequest(sqlite3* db,
                    const HttpRequest* request,
                    HttpResponse* response);
 
-/**
- * Purpose: Handle termination signals by requesting a clean server shutdown.
- * Inputs: Signal number is ignored because shutdown behavior is identical.
- * Outputs: No return value; sets global run flag to 0.
+/*
+ * Handle termination signals by requesting a clean server shutdown.
  */
 void SignalHandler(int) {
   gKeepRunning = 0;
 }
 
-/**
- * Purpose: Initialize or reset a request arena over caller-provided storage.
- * Inputs: `arena` metadata output; `storage` backing bytes; `capacity` size.
- * Outputs: No return value; arena is ready for per-request allocations.
+/*
+ * Initialize or reset a request arena over caller-provided storage.
  */
 void ArenaReset(RequestArena* arena, unsigned char* storage, size_t capacity) {
   arena->storage = storage;
@@ -205,10 +208,8 @@ void ArenaReset(RequestArena* arena, unsigned char* storage, size_t capacity) {
   arena->used = 0U;
 }
 
-/**
- * Purpose: Allocate one TextBuffer slice from the request arena.
- * Inputs: `arena` allocator state, `buffer` output handle, requested capacity.
- * Outputs: Returns true when allocation succeeds and buffer is zeroed.
+/*
+ * Allocate one TextBuffer slice from the request arena.
  */
 bool ArenaAllocTextBuffer(RequestArena* arena,
                           TextBuffer* buffer,
@@ -227,10 +228,8 @@ bool ArenaAllocTextBuffer(RequestArena* arena,
   return true;
 }
 
-/**
- * Purpose: Reset a TextBuffer to an empty C string.
- * Inputs: `buffer` must be non-null and writable.
- * Outputs: No return value; length is set to 0 and data[0] becomes '\\0'.
+/*
+ * Reset a TextBuffer to an empty C string.
  */
 void BufferReset(TextBuffer* buffer) {
   buffer->length = 0;
@@ -239,11 +238,8 @@ void BufferReset(TextBuffer* buffer) {
   }
 }
 
-/**
- * Purpose: Append raw bytes to a TextBuffer while preserving null termination.
- * Inputs: `buffer` writable destination; `text` source bytes; `len` byte count.
- * Outputs: Returns true on success; false if append would exceed buffer
- * capacity.
+/*
+ * Append raw bytes to a TextBuffer while preserving null termination.
  */
 bool BufferAppendBytes(TextBuffer* buffer, const char* text, size_t len) {
   if (buffer->length + len + 1U > buffer->capacity) {
@@ -255,19 +251,15 @@ bool BufferAppendBytes(TextBuffer* buffer, const char* text, size_t len) {
   return true;
 }
 
-/**
- * Purpose: Append a null-terminated string to a TextBuffer.
- * Inputs: `buffer` writable destination; `text` valid C string.
- * Outputs: Returns true if appended; false on insufficient remaining capacity.
+/*
+ * Append a null-terminated string to a TextBuffer.
  */
 bool BufferAppend(TextBuffer* buffer, const char* text) {
   return BufferAppendBytes(buffer, text, std::strlen(text));
 }
 
-/**
- * Purpose: Append one character to a TextBuffer.
- * Inputs: `buffer` writable destination; `ch` character to append.
- * Outputs: Returns true on success; false if buffer is full.
+/*
+ * Append one character to a TextBuffer.
  */
 bool BufferAppendChar(TextBuffer* buffer, char ch) {
   if (buffer->length + 2U > buffer->capacity) {
@@ -279,11 +271,8 @@ bool BufferAppendChar(TextBuffer* buffer, char ch) {
   return true;
 }
 
-/**
- * Purpose: Append formatted text to a TextBuffer via `vsnprintf`.
- * Inputs: `buffer` writable destination; `format` and varargs formatting
- * inputs. Outputs: Returns true if all formatted bytes fit; false on
- * encoding/overflow.
+/*
+ * Append formatted text to a TextBuffer via `vsnprintf`.
  */
 bool BufferAppendFormat(TextBuffer* buffer, const char* format, ...) {
   va_list args;
@@ -302,11 +291,8 @@ bool BufferAppendFormat(TextBuffer* buffer, const char* format, ...) {
   return true;
 }
 
-/**
- * Purpose: Append HTML-escaped text into a TextBuffer.
- * Inputs: `buffer` writable destination; `text` source bytes; `len` byte count.
- * Outputs: Returns true if fully escaped and appended; false on capacity
- * overflow.
+/*
+ * Append HTML-escaped text into a TextBuffer.
  */
 bool BufferAppendEscaped(TextBuffer* buffer, const char* text, size_t len) {
   for (size_t i = 0; i < len; i++) {
@@ -340,11 +326,8 @@ bool BufferAppendEscaped(TextBuffer* buffer, const char* text, size_t len) {
   return true;
 }
 
-/**
- * Purpose: Convert one ASCII uppercase letter to lowercase.
- * Inputs: `ch` integer character value.
- * Outputs: Returns lowercase value for 'A'..'Z', otherwise returns `ch`
- * unchanged.
+/*
+ * Convert one ASCII uppercase letter to lowercase.
  */
 int ToLowerAscii(int ch) {
   if (ch >= 'A' && ch <= 'Z') {
@@ -353,20 +336,16 @@ int ToLowerAscii(int ch) {
   return ch;
 }
 
-/**
- * Purpose: Determine whether a character is a hexadecimal digit.
- * Inputs: `ch` integer character value.
- * Outputs: Returns true for [0-9a-fA-F]; false otherwise.
+/*
+ * Determine whether a character is a hexadecimal digit.
  */
 bool IsHexDigitAscii(int ch) {
   return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') ||
          (ch >= 'A' && ch <= 'F');
 }
 
-/**
- * Purpose: Convert a hexadecimal digit character to its numeric value.
- * Inputs: `ch` must be a hexadecimal digit.
- * Outputs: Returns value in range [0, 15].
+/*
+ * Convert a hexadecimal digit character to its numeric value.
  */
 int HexDigitValue(int ch) {
   if (ch >= '0' && ch <= '9') {
@@ -378,10 +357,8 @@ int HexDigitValue(int ch) {
   return ch - 'A' + 10;
 }
 
-/**
- * Purpose: Validate HTTP header-name token character per RFC tchar set.
- * Inputs: `ch` ASCII character code.
- * Outputs: Returns true when `ch` is allowed in header field-name.
+/*
+ * Validate HTTP header-name token character per RFC tchar set.
  */
 bool IsHeaderTokenChar(int ch) {
   if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
@@ -410,11 +387,8 @@ bool IsHeaderTokenChar(int ch) {
   }
 }
 
-/**
- * Purpose: Parse a base-10 unsigned integer with strict full-string validation.
- * Inputs: `text` digits-only C string; `out` writable result pointer.
- * Outputs: Returns true and writes parsed value on success; false on empty,
- * non-digit, overflow, or invalid input.
+/*
+ * Parse a base-10 unsigned integer with strict full-string validation.
  */
 bool ParseUnsignedSizeStrict(const char* text, size_t* out) {
   if (text == nullptr || text[0] == '\0') {
@@ -437,10 +411,8 @@ bool ParseUnsignedSizeStrict(const char* text, size_t* out) {
   return true;
 }
 
-/**
- * Purpose: Parse a strictly positive signed integer without suffix garbage.
- * Inputs: `text` digits-only C string; `out` writable result pointer.
- * Outputs: Returns true and writes value in [1, INT32_MAX]; false otherwise.
+/*
+ * Parse a strictly positive signed integer without suffix garbage.
  */
 bool ParsePositiveIntStrict(const char* text, int* out) {
   size_t value = 0U;
@@ -454,10 +426,8 @@ bool ParsePositiveIntStrict(const char* text, int* out) {
   return true;
 }
 
-/**
- * Purpose: Lowercase a mutable ASCII string in place.
- * Inputs: `text` non-null writable C string.
- * Outputs: No return value; `text` is modified in place.
+/*
+ * Lowercase a mutable ASCII string in place.
  */
 void LowerString(char* text) {
   const size_t len = std::strlen(text);
@@ -466,10 +436,8 @@ void LowerString(char* text) {
   }
 }
 
-/**
- * Purpose: Remove leading and trailing ASCII whitespace in place.
- * Inputs: `text` non-null writable C string.
- * Outputs: No return value; trimmed string remains in `text`.
+/*
+ * Remove leading and trailing ASCII whitespace in place.
  */
 void TrimInPlace(char* text) {
   size_t start = 0;
@@ -491,11 +459,8 @@ void TrimInPlace(char* text) {
   text[end - start] = '\0';
 }
 
-/**
- * Purpose: Safely copy one C string into a fixed-size destination.
- * Inputs: `dst` writable buffer; `dstSize` capacity; `src` null-terminated
- * input. Outputs: Returns true when copy fits including terminator; false on
- * overflow/zero capacity.
+/*
+ * Safely copy one C string into a fixed-size destination.
  */
 bool CopyString(char* dst, size_t dstSize, const char* src) {
   if (dstSize == 0U) {
@@ -509,11 +474,8 @@ bool CopyString(char* dst, size_t dstSize, const char* src) {
   return true;
 }
 
-/**
- * Purpose: Decode percent-encoded URL text and '+' spaces.
- * Inputs: `out` writable buffer with `outSize`; `in` encoded bytes and `inLen`.
- * Outputs: Returns decoded byte count; `out` is always null-terminated if
- * outSize > 0.
+/*
+ * Decode percent-encoded URL text and '+' spaces.
  */
 size_t UrlDecode(char* out, size_t outSize, const char* in, size_t inLen) {
   if (outSize == 0U) {
@@ -551,12 +513,8 @@ size_t UrlDecode(char* out, size_t outSize, const char* in, size_t inLen) {
   return outLen;
 }
 
-/**
- * Purpose: Decode percent-encoded URL text with strict overflow signaling.
- * Inputs: `out` writable buffer with `outSize`; `in` encoded bytes and `inLen`;
- * optional decoded-length output `outLen`.
- * Outputs: Returns true on full decode without truncation; false when output
- * capacity is insufficient.
+/*
+ * Decode percent-encoded URL text with strict overflow signaling.
  */
 bool UrlDecodeStrict(char* out,
                      size_t outSize,
@@ -607,11 +565,9 @@ bool UrlDecodeStrict(char* out,
   return true;
 }
 
-/**
- * Purpose: Encode a string for URL-safe usage while preserving common safe
- * characters. Inputs: `in` source C string; `out` destination buffer; `outSize`
- * capacity. Outputs: Returns true on full encode; false if destination capacity
- * is insufficient.
+/*
+ * Encode a string for URL-safe usage while preserving common safe
+ * characters.
  */
 bool UrlEncode(const char* in, char* out, size_t outSize) {
   static const char HEX[] = "0123456789ABCDEF";
@@ -643,11 +599,8 @@ bool UrlEncode(const char* in, char* out, size_t outSize) {
   return true;
 }
 
-/**
- * Purpose: Convert free-form title text into a normalized page slug.
- * Inputs: `input` source C string; `slug` output buffer; `slugSize` capacity.
- * Outputs: Returns true and writes a lowercase slug; may emit "untitled"
- * fallback. Returns false when output capacity is insufficient.
+/*
+ * Convert free-form title text into a normalized page slug.
  */
 bool Slugify(const char* input, char* slug, size_t slugSize) {
   size_t slugLen = 0;
@@ -706,11 +659,8 @@ bool Slugify(const char* input, char* slug, size_t slugSize) {
   return true;
 }
 
-/**
- * Purpose: Validate a slug against allowed wiki path character rules.
- * Inputs: `slug` null-terminated candidate string.
- * Outputs: Returns true when slug is non-empty, contains no "..", and only
- * allowed chars.
+/*
+ * Validate a slug against allowed wiki path character rules.
  */
 bool IsSafeSlug(const char* slug) {
   if (slug[0] == '\0') {
@@ -732,10 +682,8 @@ bool IsSafeSlug(const char* slug) {
   return true;
 }
 
-/**
- * Purpose: Format current UTC time as an ISO-8601 timestamp.
- * Inputs: `out` writable character buffer; `outSize` capacity.
- * Outputs: No return value; writes timestamp such as `2026-02-24T15:04:05Z`.
+/*
+ * Format current UTC time as an ISO-8601 timestamp.
  */
 void NowIso8601(char* out, size_t outSize) {
   const std::time_t now = std::time(nullptr);
@@ -749,10 +697,8 @@ void NowIso8601(char* out, size_t outSize) {
   (void)std::strftime(out, outSize, "%Y-%m-%dT%H:%M:%SZ", &tmUtc);
 }
 
-/**
- * Purpose: Map HTTP status code to a reason phrase string.
- * Inputs: `status` numeric HTTP status value.
- * Outputs: Returns static reason phrase pointer (never null).
+/*
+ * Map HTTP status code to a reason phrase string.
  */
 const char* StatusText(int status) {
   if (status == 200) {
@@ -779,11 +725,8 @@ const char* StatusText(int status) {
   return "Unknown";
 }
 
-/**
- * Purpose: Populate an HttpResponse with status, content type, and body.
- * Inputs: response destination pointer; status code; contentType string;
- * body pointer; bodyLen in bytes.
- * Outputs: No return value; response fields are fully overwritten.
+/*
+ * Populate an HttpResponse with status, content type, and body.
  */
 void SetResponse(HttpResponse* response,
                  int status,
@@ -799,11 +742,8 @@ void SetResponse(HttpResponse* response,
   response->hasLocation = false;
 }
 
-/**
- * Purpose: Copy a textual body into stable storage before assigning response.
- * Inputs: response destination pointer; status/content type; body string and
- * byte length (must fit text response buffer).
- * Outputs: true when copied and assigned; false on size overflow.
+/*
+ * Copy a textual body into stable storage before assigning response.
  */
 bool SetResponseCopy(HttpResponse* response,
                      int status,
@@ -820,10 +760,8 @@ bool SetResponseCopy(HttpResponse* response,
   return true;
 }
 
-/**
- * Purpose: Build a 302 redirect response with a `Location` header value.
- * Inputs: `response` writable output object; `location` destination URL/path.
- * Outputs: No return value; `response` is populated as a redirect.
+/*
+ * Build a 302 redirect response with a `Location` header value.
  */
 void SetRedirect(HttpResponse* response, const char* location) {
   static const char BODY[] = "redirect";
@@ -846,657 +784,8 @@ typedef struct {
   int failed;
 } SelfTestState;
 
-/**
- * Purpose: Record one self-test assertion result and report failures.
- * Inputs: `state` writable counters; `condition` assertion result; `name` test
- * label. Outputs: No return value; increments `passed` or `failed`.
- */
-void SelfTestExpect(SelfTestState* state, bool condition, const char* name) {
-  if (condition) {
-    state->passed += 1;
-  } else {
-    state->failed += 1;
-    std::fprintf(stderr, "SELFTEST FAIL: %s\n", name);
-  }
-}
-
-/**
- * Purpose: Write an entire byte range to a file descriptor.
- * Inputs: `fd` writable descriptor; `data` source bytes; `len` byte count.
- * Outputs: Returns true when all bytes are written; false on write failure.
- */
-bool WriteAllFd(int fd, const unsigned char* data, size_t len) {
-  size_t sent = 0U;
-  while (sent < len) {
-    const ssize_t n = write(fd, data + sent, len - sent);
-    if (n <= 0) {
-      return false;
-    }
-    sent += static_cast<size_t>(n);
-  }
-  return true;
-}
-
-/**
- * Purpose: Execute unit-level tests for slug, URL codec, and integer parsing
- * helpers. Inputs: `state` writable aggregate test counters. Outputs: No return
- * value; appends pass/fail results into `state`.
- */
-void SelfTestSlugAndCodec(SelfTestState* state) {
-  char slug[MAX_SLUG];
-  SelfTestExpect(state,
-                 Slugify("Hello World", slug, sizeof(slug)) &&
-                     std::strcmp(slug, "hello-world") == 0,
-                 "Slugify basic text");
-  SelfTestExpect(state, IsSafeSlug("good/page_1"),
-                 "IsSafeSlug allows valid slugs");
-  SelfTestExpect(state, !IsSafeSlug("../bad"),
-                 "IsSafeSlug rejects parent refs");
-
-  char encoded[128];
-  SelfTestExpect(state,
-                 UrlEncode("a b/c", encoded, sizeof(encoded)) &&
-                     std::strcmp(encoded, "a%20b/c") == 0,
-                 "UrlEncode escapes spaces");
-
-  char decoded[128];
-  (void)UrlDecode(decoded, sizeof(decoded), "a%20b%2Fc+z", 11U);
-  SelfTestExpect(state, std::strcmp(decoded, "a b/c z") == 0,
-                 "UrlDecode reverses escapes");
-  (void)UrlDecode(decoded, sizeof(decoded), "bad%GGvalue", 11U);
-  SelfTestExpect(state, std::strcmp(decoded, "bad%GGvalue") == 0,
-                 "UrlDecode leaves malformed escapes literal");
-  (void)UrlDecode(decoded, sizeof(decoded), "bad%00value", 11U);
-  SelfTestExpect(state, std::strcmp(decoded, "bad%00value") == 0,
-                 "UrlDecode leaves encoded NUL literal");
-  SelfTestExpect(state, !DecodeRouteSlugStrict("ok%00bad", slug, sizeof(slug)),
-                 "DecodeRouteSlugStrict rejects encoded NUL");
-  char longSlugInput[MAX_SLUG + 32U];
-  (void)std::memset(longSlugInput, 'a', sizeof(longSlugInput));
-  longSlugInput[sizeof(longSlugInput) - 1U] = '\0';
-  SelfTestExpect(state,
-                 !DecodeRouteSlugStrict(longSlugInput, slug, sizeof(slug)),
-                 "DecodeRouteSlugStrict rejects decode truncation");
-
-  int parsedPositive = 0;
-  SelfTestExpect(state, ParsePositiveIntStrict("42", &parsedPositive),
-                 "ParsePositiveIntStrict valid");
-  SelfTestExpect(state, parsedPositive == 42, "ParsePositiveIntStrict value");
-  SelfTestExpect(state, !ParsePositiveIntStrict("42x", &parsedPositive),
-                 "ParsePositiveIntStrict rejects suffix");
-}
-
-/**
- * Purpose: Verify markdown rendering, wiki-link extraction, footnotes, and MIME
- * sniffing. Inputs: `state` writable aggregate test counters. Outputs: No
- * return value; appends pass/fail results into `state`.
- */
-void SelfTestLinksAndMarkdown(SelfTestState* state) {
-  char links[8][MAX_SLUG];
-  size_t linkCount = 0;
-  ExtractWikiLinks("See [[Target Page]] and [[target-page|label]]", links,
-                   &linkCount, 8U);
-  SelfTestExpect(state, linkCount == 1U, "ExtractWikiLinks deduplicates");
-  SelfTestExpect(state, std::strcmp(links[0], "target-page") == 0,
-                 "ExtractWikiLinks slugifies");
-
-  static unsigned char arenaStorage[MAX_RESPONSE_BYTES];
-  RequestArena arena;
-  ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
-  TextBuffer html;
-  if (!ArenaAllocTextBuffer(&arena, &html, MAX_RESPONSE_BYTES)) {
-    SelfTestExpect(state, false, "RenderMarkdownToHtml arena alloc");
-    return;
-  }
-  const bool rendered = RenderMarkdownToHtml(
-      "# Title\nWiki [[Other Page|Label]][^n]\n"
-      "![Side Image](/image/7)\n"
-      "[^n]: Footnote body.\n"
-      "* item\n",
-      &html);
-  SelfTestExpect(state, rendered, "RenderMarkdownToHtml success");
-  SelfTestExpect(state, std::strstr(html.data, "<h1>Title</h1>") != nullptr,
-                 "Render markdown heading");
-  SelfTestExpect(state,
-                 std::strstr(html.data, "href=\"/page/other-page\"") != nullptr,
-                 "Render wiki href");
-  SelfTestExpect(state, std::strstr(html.data, ">Label</a>") != nullptr,
-                 "Render wiki label");
-  SelfTestExpect(state,
-                 std::strstr(html.data, "class=\"margin-figure\"") != nullptr,
-                 "Render image as margin figure");
-  SelfTestExpect(state, std::strstr(html.data, "class=\"sidenote\"") != nullptr,
-                 "Render sidenote");
-  SelfTestExpect(
-      state,
-      std::strstr(html.data, "<section class=\"panel footnotes\">") != nullptr,
-      "Render footnotes section");
-
-  static const unsigned char PNG_SIG[] = {0x89U, 0x50U, 0x4EU, 0x47U,
-                                          0x0DU, 0x0AU, 0x1AU, 0x0AU};
-  SelfTestExpect(state,
-                 std::strcmp(DetectImageMimeFromData(PNG_SIG, sizeof(PNG_SIG)),
-                             "image/png") == 0,
-                 "DetectImageMimeFromData png");
-
-  TextBuffer securityHtml;
-  if (!ArenaAllocTextBuffer(&arena, &securityHtml, MAX_RESPONSE_BYTES)) {
-    SelfTestExpect(state, false, "RenderMarkdownToHtml security arena alloc");
-    return;
-  }
-  const bool renderedSecurity = RenderMarkdownToHtml(
-      "[link](javascript:alert(1))\n"
-      "![img](javascript:alert(1))\n"
-      "[safe](https://example.com/a_(b))\n"
-      "[^bad\"id]: note\n"
-      "ref[^bad\"id]\n",
-      &securityHtml);
-  SelfTestExpect(state, renderedSecurity,
-                 "RenderMarkdownToHtml security cases");
-  SelfTestExpect(
-      state, std::strstr(securityHtml.data, "href=\"javascript:") == nullptr,
-      "Markdown link blocks javascript scheme");
-  SelfTestExpect(state,
-                 std::strstr(securityHtml.data, "src=\"javascript:") == nullptr,
-                 "Markdown image blocks javascript scheme");
-  SelfTestExpect(state,
-                 std::strstr(securityHtml.data,
-                             "href=\"https://example.com/a_(b)\"") != nullptr,
-                 "Markdown link supports nested URL parentheses");
-  SelfTestExpect(state, std::strstr(securityHtml.data, "bad\"id") == nullptr,
-                 "Footnote id rejects unsafe characters");
-}
-
-/**
- * Purpose: Validate URL form parsing and multipart image parsing behavior.
- * Inputs: `state` writable aggregate test counters.
- * Outputs: No return value; appends pass/fail results into `state`.
- */
-void SelfTestFormAndMultipart(SelfTestState* state) {
-  HttpRequest request;
-  (void)std::memset(&request, 0, sizeof(request));
-  static const char FORM_BODY[] = "title=Hello+World&markdown=Line1%0ALine2";
-  request.body = reinterpret_cast<const unsigned char*>(FORM_BODY);
-  request.bodyLen = sizeof(FORM_BODY) - 1U;
-
-  char title[MAX_TITLE];
-  char markdown[128];
-  SelfTestExpect(state, ParseFormField(&request, "title", title, sizeof(title)),
-                 "ParseFormField title exists");
-  SelfTestExpect(state, std::strcmp(title, "Hello World") == 0,
-                 "ParseFormField decodes +");
-  SelfTestExpect(
-      state, ParseFormField(&request, "markdown", markdown, sizeof(markdown)),
-      "ParseFormField markdown exists");
-  SelfTestExpect(state, std::strcmp(markdown, "Line1\nLine2") == 0,
-                 "ParseFormField decodes percent escapes");
-  char tinyTitle[8];
-  SelfTestExpect(
-      state, !ParseFormField(&request, "title", tinyTitle, sizeof(tinyTitle)),
-      "ParseFormField rejects decode truncation");
-
-  (void)std::memset(&request, 0, sizeof(request));
-  request.headerCount = 1;
-  (void)CopyString(request.headers[0].key, sizeof(request.headers[0].key),
-                   "content-type");
-  (void)CopyString(request.headers[0].value, sizeof(request.headers[0].value),
-                   "multipart/form-data; boundary=abc123; charset=utf-8");
-  static const char MULTIPART_BODY[] =
-      "--abc123\r\n"
-      "Content-Disposition: form-data; name=\"image\"; filename=\"p.png\"\r\n"
-      "Content-Type: image/png\r\n"
-      "\r\n"
-      "PNGDATA\r\n"
-      "--abc123--\r\n";
-  request.body = reinterpret_cast<const unsigned char*>(MULTIPART_BODY);
-  request.bodyLen = sizeof(MULTIPART_BODY) - 1U;
-
-  MultipartImage image;
-  ParseMultipartImage(&request, &image);
-  SelfTestExpect(state, image.valid, "ParseMultipartImage sets valid");
-  SelfTestExpect(state, std::strcmp(image.filename, "p.png") == 0,
-                 "ParseMultipartImage filename");
-  SelfTestExpect(state, std::strcmp(image.mimeType, "image/png") == 0,
-                 "ParseMultipartImage mime type");
-  SelfTestExpect(state, image.dataLen == 7U, "ParseMultipartImage data len");
-  SelfTestExpect(state, std::memcmp(image.data, "PNGDATA", 7U) == 0,
-                 "ParseMultipartImage payload");
-}
-
-/**
- * Purpose: Exercise SQLite CRUD flow for pages, backlinks, and image lifecycle.
- * Inputs: `state` writable aggregate test counters.
- * Outputs: No return value; appends pass/fail results into `state`.
- */
-void SelfTestDatabase(SelfTestState* state) {
-  char dbPath[128];
-  (void)std::snprintf(dbPath, sizeof(dbPath), "/tmp/mswiki-selftest-%d.db",
-                      static_cast<int>(getpid()));
-
-  sqlite3* db = nullptr;
-  char err[256];
-  if (!DbOpen(&db, dbPath, err, sizeof(err))) {
-    SelfTestExpect(state, false, "DbOpen");
-    return;
-  }
-
-  const bool upsertHome =
-      DbUpsertPage(db, "home", "Home", "Link to [[other]].", err, sizeof(err));
-  const bool upsertOther =
-      DbUpsertPage(db, "other", "Other", "# Other", err, sizeof(err));
-  SelfTestExpect(state, upsertHome, "DbUpsertPage home");
-  SelfTestExpect(state, upsertOther, "DbUpsertPage other");
-
-  PageRecord page;
-  bool found = false;
-  const bool getOk = DbGetPage(db, "home", &page, &found, err, sizeof(err));
-  SelfTestExpect(state, getOk, "DbGetPage call");
-  SelfTestExpect(state, found, "DbGetPage found row");
-  SelfTestExpect(state, std::strcmp(page.title, "Home") == 0,
-                 "DbGetPage title");
-
-  static unsigned char arenaStorage[MAX_RESPONSE_BYTES];
-  RequestArena arena;
-  ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
-  TextBuffer backlinksHtml;
-  if (!ArenaAllocTextBuffer(&arena, &backlinksHtml, MAX_RESPONSE_BYTES)) {
-    SelfTestExpect(state, false, "DbAppendBacklinksHtml arena alloc");
-    (void)sqlite3_close(db);
-    (void)unlink(dbPath);
-    return;
-  }
-  const bool backlinksOk =
-      DbAppendBacklinksHtml(db, "other", &backlinksHtml, err, sizeof(err));
-  SelfTestExpect(state, backlinksOk, "DbAppendBacklinksHtml call");
-  SelfTestExpect(state,
-                 std::strstr(backlinksHtml.data, "/page/home") != nullptr,
-                 "Backlink contains home");
-
-  static const unsigned char IMAGE_DATA[] = {0x47U, 0x49U, 0x46U};
-  int imageId = 0;
-  const bool insertImageOk =
-      DbInsertImage(db, "home", "tiny.gif", "image/gif", IMAGE_DATA,
-                    sizeof(IMAGE_DATA), &imageId, err, sizeof(err));
-  SelfTestExpect(state, insertImageOk, "DbInsertImage call");
-  SelfTestExpect(state, imageId > 0, "DbInsertImage id");
-
-  sqlite3_stmt* imageStmt = nullptr;
-  char mime[MAX_MIME];
-  const unsigned char* blobData = nullptr;
-  int blobLen = 0;
-  found = false;
-  const bool getImageOk =
-      DbGetImage(db, imageId, mime, sizeof(mime), &blobData, &blobLen,
-                 &imageStmt, &found, err, sizeof(err));
-  SelfTestExpect(state, getImageOk, "DbGetImage call");
-  SelfTestExpect(state, found, "DbGetImage found row");
-  SelfTestExpect(state, std::strcmp(mime, "image/gif") == 0, "DbGetImage mime");
-  SelfTestExpect(state, blobLen == 3, "DbGetImage size");
-  if (imageStmt != nullptr) {
-    (void)sqlite3_finalize(imageStmt);
-  }
-
-  const bool deleteImageOk =
-      DbDeleteImage(db, imageId, "home", err, sizeof(err));
-  SelfTestExpect(state, deleteImageOk, "DbDeleteImage call");
-  imageStmt = nullptr;
-  found = true;
-  const bool getDeletedImageOk =
-      DbGetImage(db, imageId, mime, sizeof(mime), &blobData, &blobLen,
-                 &imageStmt, &found, err, sizeof(err));
-  SelfTestExpect(state, getDeletedImageOk, "DbGetImage deleted call");
-  SelfTestExpect(state, !found, "DbDeleteImage removed row");
-  if (imageStmt != nullptr) {
-    (void)sqlite3_finalize(imageStmt);
-  }
-
-  const bool insertImageAgainOk =
-      DbInsertImage(db, "home", "tiny.gif", "image/gif", IMAGE_DATA,
-                    sizeof(IMAGE_DATA), &imageId, err, sizeof(err));
-  SelfTestExpect(state, insertImageAgainOk, "DbInsertImage second call");
-
-  const bool deletePageOk = DbDeletePage(db, "home", err, sizeof(err));
-  SelfTestExpect(state, deletePageOk, "DbDeletePage call");
-
-  found = true;
-  const bool getDeletedPageOk =
-      DbGetPage(db, "home", &page, &found, err, sizeof(err));
-  SelfTestExpect(state, getDeletedPageOk, "DbGetPage after delete call");
-  SelfTestExpect(state, !found, "DbDeletePage removed page row");
-
-  imageStmt = nullptr;
-  found = true;
-  const bool getImageAfterPageDeleteOk =
-      DbGetImage(db, imageId, mime, sizeof(mime), &blobData, &blobLen,
-                 &imageStmt, &found, err, sizeof(err));
-  SelfTestExpect(state, getImageAfterPageDeleteOk,
-                 "DbGetImage after page delete");
-  SelfTestExpect(state, !found, "DbDeletePage removed page images");
-  if (imageStmt != nullptr) {
-    (void)sqlite3_finalize(imageStmt);
-  }
-
-  (void)sqlite3_close(db);
-  (void)unlink(dbPath);
-}
-
-/**
- * Purpose: Validate handler routing and HTTP request parser guardrails.
- * Inputs: `state` writable aggregate test counters.
- * Outputs: No return value; appends pass/fail results into `state`.
- */
-void SelfTestHttpHandler(SelfTestState* state) {
-  sqlite3* db = nullptr;
-  char err[256];
-  if (!DbOpen(&db, ":memory:", err, sizeof(err))) {
-    SelfTestExpect(state, false, "DbOpen in-memory");
-    return;
-  }
-
-  RequestArena arena;
-
-  HttpRequest request;
-  HttpResponse response;
-  (void)std::memset(&request, 0, sizeof(request));
-  (void)CopyString(request.method, sizeof(request.method), "GET");
-  (void)CopyString(request.path, sizeof(request.path), "/page/home");
-  HandleRequest(db, &arena, &request, &response);
-  SelfTestExpect(state, response.status == 200, "HandleRequest GET /page/home");
-  SelfTestExpect(state, response.bodyLen > 0U, "HandleRequest body exists");
-  SelfTestExpect(state,
-                 std::strstr(reinterpret_cast<const char*>(response.body),
-                             "Create this page") != nullptr,
-                 "Missing page response content");
-  SelfTestExpect(
-      state,
-      std::strstr(reinterpret_cast<const char*>(response.body),
-                  "rel=\"icon\" href=\"data:image/svg+xml") != nullptr,
-      "Page layout includes inline favicon");
-
-  (void)std::memset(&request, 0, sizeof(request));
-  (void)CopyString(request.method, sizeof(request.method), "GET");
-  (void)CopyString(request.path, sizeof(request.path), "/pages");
-  HandleRequest(db, &arena, &request, &response);
-  SelfTestExpect(state, response.status == 200, "HandleRequest GET /pages");
-  SelfTestExpect(state,
-                 std::strstr(reinterpret_cast<const char*>(response.body),
-                             "All Pages") != nullptr,
-                 "Pages response content");
-
-  (void)std::memset(&request, 0, sizeof(request));
-  (void)CopyString(request.method, sizeof(request.method), "GET");
-  (void)CopyString(request.path, sizeof(request.path), "/edit/home");
-  HandleRequest(db, &arena, &request, &response);
-  SelfTestExpect(state, response.status == 200, "HandleRequest GET /edit/home");
-  SelfTestExpect(state,
-                 std::strstr(reinterpret_cast<const char*>(response.body),
-                             "id=\"markdown-toolbar\"") != nullptr,
-                 "Edit page renders markdown toolbar");
-  SelfTestExpect(state,
-                 std::strstr(reinterpret_cast<const char*>(response.body),
-                             "data-md-action=\"bold\"") != nullptr,
-                 "Edit page includes toolbar action buttons");
-  SelfTestExpect(state,
-                 std::strstr(reinterpret_cast<const char*>(response.body),
-                             "Images for this page") != nullptr,
-                 "Edit page includes image list section");
-
-  const bool createHomeForDelete =
-      DbUpsertPage(db, "home", "Home", "Body", err, sizeof(err));
-  SelfTestExpect(state, createHomeForDelete, "DbUpsertPage for delete route");
-  (void)std::memset(&request, 0, sizeof(request));
-  (void)CopyString(request.method, sizeof(request.method), "GET");
-  (void)CopyString(request.path, sizeof(request.path), "/page/home");
-  HandleRequest(db, &arena, &request, &response);
-  static const unsigned char DELETE_PAGE_TEXT[] = "Delete page";
-  static const unsigned char DELETE_IMAGE_ROUTE[] = "/images/delete/";
-  SelfTestExpect(state,
-                 FindBytes(response.body, response.bodyLen, DELETE_PAGE_TEXT,
-                           sizeof(DELETE_PAGE_TEXT) - 1U) == nullptr,
-                 "View page does not render delete page button");
-  SelfTestExpect(state,
-                 FindBytes(response.body, response.bodyLen, DELETE_IMAGE_ROUTE,
-                           sizeof(DELETE_IMAGE_ROUTE) - 1U) == nullptr,
-                 "View page does not render delete image actions");
-  (void)std::memset(&request, 0, sizeof(request));
-  (void)CopyString(request.method, sizeof(request.method), "POST");
-  (void)CopyString(request.path, sizeof(request.path), "/delete/home");
-  HandleRequest(db, &arena, &request, &response);
-  SelfTestExpect(state, response.status == 302,
-                 "HandleRequest POST /delete/home");
-  SelfTestExpect(state, std::strcmp(response.location, "/pages") == 0,
-                 "Delete page redirects to /pages");
-  (void)std::memset(&request, 0, sizeof(request));
-  (void)CopyString(request.method, sizeof(request.method), "GET");
-  (void)CopyString(request.path, sizeof(request.path), "/page/home");
-  HandleRequest(db, &arena, &request, &response);
-  SelfTestExpect(state,
-                 std::strstr(reinterpret_cast<const char*>(response.body),
-                             "Create this page") != nullptr,
-                 "Deleted page behaves as missing");
-  (void)std::memset(&request, 0, sizeof(request));
-  (void)CopyString(request.method, sizeof(request.method), "POST");
-  (void)CopyString(request.path, sizeof(request.path), "/delete/%00");
-  HandleRequest(db, &arena, &request, &response);
-  SelfTestExpect(state, response.status == 400,
-                 "HandleRequest rejects encoded-NUL slug");
-
-  HttpRequest parsedRequest;
-  (void)std::memset(&parsedRequest, 0, sizeof(parsedRequest));
-  SelfTestExpect(state, !ParseRequestLine("GET / HTTP/2", &parsedRequest),
-                 "ParseRequestLine rejects HTTP/2");
-  SelfTestExpect(state, ParseRequestLine("GET / HTTP/1.1", &parsedRequest),
-                 "ParseRequestLine accepts HTTP/1.1");
-
-  unsigned char rawNoHost[] = "GET / HTTP/1.1\r\nUser-Agent: x\r\n\r\n";
-  const unsigned char* bodyStart = nullptr;
-  size_t bodyOffset = 0U;
-  SelfTestExpect(state,
-                 !ParseHttpRequest(rawNoHost, sizeof(rawNoHost) - 1U,
-                                   &parsedRequest, &bodyStart, &bodyOffset),
-                 "ParseHttpRequest rejects HTTP/1.1 without host");
-
-  unsigned char rawWithHost[] = "GET / HTTP/1.1\r\nHost: wiki.local\r\n\r\n";
-  SelfTestExpect(state,
-                 ParseHttpRequest(rawWithHost, sizeof(rawWithHost) - 1U,
-                                  &parsedRequest, &bodyStart, &bodyOffset),
-                 "ParseHttpRequest accepts HTTP/1.1 with host");
-  unsigned char rawBadHeader[] =
-      "GET / HTTP/1.1\r\nHost: wiki.local\r\nXBad\r\n\r\n";
-  SelfTestExpect(state,
-                 !ParseHttpRequest(rawBadHeader, sizeof(rawBadHeader) - 1U,
-                                   &parsedRequest, &bodyStart, &bodyOffset),
-                 "ParseHttpRequest rejects malformed header line");
-  unsigned char rawBadHeaderName[] =
-      "GET / HTTP/1.1\r\nHost: wiki.local\r\nBad Header: x\r\n\r\n";
-  SelfTestExpect(
-      state,
-      !ParseHttpRequest(rawBadHeaderName, sizeof(rawBadHeaderName) - 1U,
-                        &parsedRequest, &bodyStart, &bodyOffset),
-      "ParseHttpRequest rejects invalid header-name token");
-  SelfTestExpect(state,
-                 !ParseRequestLine("GET noslash HTTP/1.1", &parsedRequest),
-                 "ParseRequestLine rejects non-origin-form target");
-  unsigned char rawEmbeddedNul[] = {
-      'G', 'E',  'T',  ' ', '/', ' ', 'H', 'T',  'T',  'P',  '/', '1',  '.',
-      '1', '\r', '\n', 'H', 'o', 's', 't', ':',  ' ',  'w',  'i', '\0', 'k',
-      'i', '.',  'l',  'o', 'c', 'a', 'l', '\r', '\n', '\r', '\n'};
-  SelfTestExpect(state,
-                 !ParseHttpRequest(rawEmbeddedNul, sizeof(rawEmbeddedNul),
-                                   &parsedRequest, &bodyStart, &bodyOffset),
-                 "ParseHttpRequest rejects embedded NUL in headers");
-
-  HttpRequest badImageIdRequest;
-  HttpResponse badImageIdResponse;
-  (void)std::memset(&badImageIdRequest, 0, sizeof(badImageIdRequest));
-  (void)CopyString(badImageIdRequest.method, sizeof(badImageIdRequest.method),
-                   "GET");
-  (void)CopyString(badImageIdRequest.path, sizeof(badImageIdRequest.path),
-                   "/image/1abc");
-  HandleRequest(db, &arena, &badImageIdRequest, &badImageIdResponse);
-  SelfTestExpect(state, badImageIdResponse.status == 400,
-                 "HandleRequest rejects /image suffix garbage");
-
-  HttpRequest badDeleteIdRequest;
-  HttpResponse badDeleteIdResponse;
-  (void)std::memset(&badDeleteIdRequest, 0, sizeof(badDeleteIdRequest));
-  (void)CopyString(badDeleteIdRequest.method, sizeof(badDeleteIdRequest.method),
-                   "POST");
-  (void)CopyString(badDeleteIdRequest.path, sizeof(badDeleteIdRequest.path),
-                   "/images/delete/1abc/home");
-  HandleRequest(db, &arena, &badDeleteIdRequest, &badDeleteIdResponse);
-  SelfTestExpect(state, badDeleteIdResponse.status == 400,
-                 "HandleRequest rejects /images/delete suffix garbage");
-
-  HttpRequest logoRequest;
-  HttpResponse logoResponse;
-  (void)std::memset(&logoRequest, 0, sizeof(logoRequest));
-  (void)CopyString(logoRequest.method, sizeof(logoRequest.method), "GET");
-  (void)CopyString(logoRequest.path, sizeof(logoRequest.path), "/logo");
-  HandleRequest(db, &arena, &logoRequest, &logoResponse);
-  SelfTestExpect(state, logoResponse.status == 404,
-                 "HandleRequest no longer serves /logo");
-
-  (void)sqlite3_close(db);
-}
-
-/**
- * Purpose: Verify socket-level request framing checks with realistic read
- * paths. Inputs: `state` writable aggregate test counters. Outputs: No return
- * value; appends pass/fail results into `state`.
- */
-void SelfTestSocketRequestValidation(SelfTestState* state) {
-  struct {
-    const char* name;
-    const char* raw;
-    bool expectSuccess;
-    bool expectTooLarge;
-  } cases[] = {
-      {"GET no content-length allowed",
-       "GET / HTTP/1.1\r\nHost: wiki.local\r\n\r\n", true, false},
-      {"POST requires content-length",
-       "POST /save/home HTTP/1.1\r\nHost: wiki.local\r\n\r\n"
-       "title=x&markdown=y",
-       false, false},
-      {"Transfer-Encoding rejected",
-       "POST /save/home HTTP/1.1\r\nHost: wiki.local\r\nTransfer-Encoding: "
-       "chunked\r\nContent-Length: 4\r\n\r\n"
-       "test",
-       false, false},
-      {"Duplicate mismatched content-length rejected",
-       "POST /save/home HTTP/1.1\r\nHost: wiki.local\r\nContent-Length: 4\r\n"
-       "Content-Length: 7\r\n\r\n"
-       "test",
-       false, false},
-      {"Duplicate matching content-length allowed",
-       "POST /save/home HTTP/1.1\r\nHost: wiki.local\r\nContent-Length: 4\r\n"
-       "Content-Length: 4\r\n\r\n"
-       "test",
-       true, false},
-      {"Too large content-length flagged",
-       "POST /save/home HTTP/1.1\r\nHost: wiki.local\r\nContent-Length: "
-       "10485761\r\n\r\n",
-       false, true},
-  };
-
-  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-    int fds[2] = {-1, -1};
-    const int sp = socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
-    if (sp != 0) {
-      SelfTestExpect(state, false, cases[i].name);
-      continue;
-    }
-
-    const unsigned char* raw =
-        reinterpret_cast<const unsigned char*>(cases[i].raw);
-    const size_t rawLen = std::strlen(cases[i].raw);
-    const bool writeOk = WriteAllFd(fds[0], raw, rawLen);
-    (void)shutdown(fds[0], SHUT_WR);
-    if (!writeOk) {
-      (void)close(fds[0]);
-      (void)close(fds[1]);
-      SelfTestExpect(state, false, cases[i].name);
-      continue;
-    }
-
-    static unsigned char scratch[MAX_REQUEST_BYTES];
-
-    size_t outLen = 0U;
-    bool tooLarge = false;
-    const bool ok = ReadRequestFromSocket(fds[1], MAX_BODY_BYTES, scratch,
-                                          &outLen, &tooLarge);
-    (void)close(fds[0]);
-    (void)close(fds[1]);
-
-    const bool pass =
-        (ok == cases[i].expectSuccess) && (tooLarge == cases[i].expectTooLarge);
-    SelfTestExpect(state, pass, cases[i].name);
-  }
-}
-
-/**
- * Purpose: Verify command-line parsing accepts supported flags and rejects
- * removed/unknown flags.
- * Inputs: `state` writable aggregate test counters.
- * Outputs: No return value; appends pass/fail results into `state`.
- */
-void SelfTestParseArgs(SelfTestState* state) {
-  Config config;
-
-  char progName[] = "mswiki";
-  char dbFlag[] = "--db";
-  char dbPath[] = "/tmp/wiki.db";
-  char maxBodyFlag[] = "--max-body-bytes";
-  char maxBodyValue[] = "1024";
-  char* validArgv[] = {progName, dbFlag, dbPath, maxBodyFlag, maxBodyValue};
-  const ArgParseResult validResult =
-      ParseArgs(static_cast<int>(sizeof(validArgv) / sizeof(validArgv[0])),
-                validArgv, &config);
-  SelfTestExpect(state, validResult == ARG_PARSE_OK,
-                 "ParseArgs accepts supported flags");
-  SelfTestExpect(state, std::strcmp(config.dbPath, "/tmp/wiki.db") == 0,
-                 "ParseArgs sets db path");
-  SelfTestExpect(state, config.maxBodyBytes == 1024U,
-                 "ParseArgs sets max body size");
-
-  char removedFlag[] = "--assets";
-  char removedValue[] = "/tmp/assets";
-  char* removedArgv[] = {progName, removedFlag, removedValue};
-  const ArgParseResult removedResult =
-      ParseArgs(static_cast<int>(sizeof(removedArgv) / sizeof(removedArgv[0])),
-                removedArgv, &config);
-  SelfTestExpect(state, removedResult == ARG_PARSE_ERROR,
-                 "ParseArgs rejects removed --assets flag");
-}
-
-/**
- * Purpose: Run full built-in self-test suite and print aggregate result.
- * Inputs: No function arguments.
- * Outputs: Returns 0 when all tests pass; 1 when any test fails.
- */
-int RunSelfTests() {
-  SelfTestState state;
-  state.passed = 0;
-  state.failed = 0;
-
-  SelfTestSlugAndCodec(&state);
-  SelfTestLinksAndMarkdown(&state);
-  SelfTestFormAndMultipart(&state);
-  SelfTestDatabase(&state);
-  SelfTestHttpHandler(&state);
-  SelfTestSocketRequestValidation(&state);
-  SelfTestParseArgs(&state);
-
-  std::printf("Self-test results: passed=%d failed=%d\n", state.passed,
-              state.failed);
-  return (state.failed == 0) ? 0 : 1;
-}
-
-/**
- * Purpose: Populate response as plain-text error with bounded body copy.
- * Inputs: `response` writable output; `status` HTTP code; `message` text body.
- * Outputs: No return value; `response` contains error body or fallback internal
- * error.
+/*
+ * Populate response as plain-text error with bounded body copy.
  */
 void SetError(HttpResponse* response, int status, const char* message) {
   if (message == nullptr) {
@@ -1515,1979 +804,22 @@ void SetError(HttpResponse* response, int status, const char* message) {
               len);
 }
 
-/**
- * Purpose: Lookup a normalized HTTP header value by lowercase key.
- * Inputs: `request` parsed request with header list; `key` lowercase header
- * name. Outputs: Returns pointer to value inside request storage or null when
- * absent.
- */
-const char* FindHeader(const HttpRequest* request, const char* key) {
-  for (size_t i = 0; i < request->headerCount; i++) {
-    if (std::strcmp(request->headers[i].key, key) == 0) {
-      return request->headers[i].value;
-    }
-  }
-  return nullptr;
-}
+#include "sections/http_parsing.inc"
 
-/**
- * Purpose: Parse HTTP request line into method, target, version, path, and
- * query. Inputs: `line` request-line C string; `request` writable parsed
- * output. Outputs: Returns true for valid HTTP/1.0 or HTTP/1.1 syntax; false
- * otherwise.
- */
-bool ParseRequestLine(const char* line, HttpRequest* request) {
-  int matched = std::sscanf(line, "%7s %1023s %15s", request->method,
-                            request->target, request->version);
-  if (matched != 3) {
-    return false;
-  }
-  if (std::strcmp(request->version, "HTTP/1.1") != 0 &&
-      std::strcmp(request->version, "HTTP/1.0") != 0) {
-    return false;
-  }
-  if (request->target[0] != '/') {
-    return false;
-  }
+#include "sections/http_body_parsing.inc"
 
-  const char* question = std::strchr(request->target, '?');
-  if (question == nullptr) {
-    if (!CopyString(request->path, sizeof(request->path), request->target)) {
-      return false;
-    }
-    request->query[0] = '\0';
-  } else {
-    const size_t pathLen = static_cast<size_t>(question - request->target);
-    if (pathLen + 1U > sizeof(request->path)) {
-      return false;
-    }
-    (void)std::memcpy(request->path, request->target, pathLen);
-    request->path[pathLen] = '\0';
+#include "sections/markdown_rendering.inc"
 
-    if (!CopyString(request->query, sizeof(request->query), question + 1)) {
-      return false;
-    }
-  }
+#include "sections/wiki_link_extraction.inc"
 
-  return true;
-}
+#include "sections/db_open.inc"
 
-/**
- * Purpose: Decode and validate a route slug/path component without slugify
- * fallback. Inputs: `encoded` URL-encoded path segment, `slug` output buffer,
- * `slugSize`. Outputs: Returns true when decoded slug is non-empty and matches
- * safe-slug rules.
- */
-bool DecodeRouteSlugStrict(const char* encoded, char* slug, size_t slugSize) {
-  size_t decodedLen = 0U;
-  if (!UrlDecodeStrict(slug, slugSize, encoded, std::strlen(encoded),
-                       &decodedLen)) {
-    return false;
-  }
-  if (decodedLen == 0U) {
-    return false;
-  }
-  if (slug[0] == '\0') {
-    return false;
-  }
-  LowerString(slug);
-  return IsSafeSlug(slug);
-}
+#include "sections/db_pages.inc"
 
-/**
- * Purpose: Parse a complete HTTP request buffer into HttpRequest fields.
- * Inputs: raw mutable request bytes (header bytes are modified in place),
- * rawLen total bytes, request/body output pointers.
- * Outputs: true on successful parse; false on malformed request framing.
- */
-bool ParseHttpRequest(unsigned char* raw,
-                      size_t rawLen,
-                      HttpRequest* request,
-                      const unsigned char** bodyStart,
-                      size_t* bodyOffset) {
-  request->headerCount = 0;
+#include "sections/db_images.inc"
 
-  size_t headerEnd = 0;
-  bool found = false;
-  for (size_t i = 0; i + 3U < rawLen; i++) {
-    if (raw[i] == '\r' && raw[i + 1U] == '\n' && raw[i + 2U] == '\r' &&
-        raw[i + 3U] == '\n') {
-      headerEnd = i;
-      found = true;
-      break;
-    }
-  }
-  if (!found) {
-    return false;
-  }
-  for (size_t i = 0; i < headerEnd; i++) {
-    if (raw[i] == '\0') {
-      return false;
-    }
-  }
-
-  raw[headerEnd] = '\0';
-  char* cursor = reinterpret_cast<char*>(raw);
-  char* lineEnd = std::strstr(cursor, "\r\n");
-  if (lineEnd == nullptr) {
-    return false;
-  }
-  *lineEnd = '\0';
-  if (!ParseRequestLine(cursor, request)) {
-    return false;
-  }
-
-  cursor = lineEnd + 2;
-  while (*cursor != '\0') {
-    lineEnd = std::strstr(cursor, "\r\n");
-    if (lineEnd != nullptr) {
-      *lineEnd = '\0';
-    }
-
-    char* colon = std::strchr(cursor, ':');
-    if (colon == nullptr || colon == cursor) {
-      return false;
-    }
-    for (const char* it = cursor; it < colon; ++it) {
-      if (!IsHeaderTokenChar(static_cast<unsigned char>(*it))) {
-        return false;
-      }
-    }
-    *colon = '\0';
-    if (request->headerCount >= MAX_HEADERS) {
-      return false;
-    }
-    if (!CopyString(request->headers[request->headerCount].key,
-                    sizeof(request->headers[request->headerCount].key),
-                    cursor)) {
-      return false;
-    }
-    LowerString(request->headers[request->headerCount].key);
-
-    if (!CopyString(request->headers[request->headerCount].value,
-                    sizeof(request->headers[request->headerCount].value),
-                    colon + 1)) {
-      return false;
-    }
-    TrimInPlace(request->headers[request->headerCount].value);
-    request->headerCount++;
-
-    if (lineEnd == nullptr) {
-      break;
-    }
-    cursor = lineEnd + 2;
-  }
-
-  if (std::strcmp(request->version, "HTTP/1.1") == 0) {
-    const char* host = FindHeader(request, "host");
-    if (host == nullptr || host[0] == '\0') {
-      return false;
-    }
-  }
-
-  *bodyOffset = headerEnd + 4U;
-  if (*bodyOffset > rawLen) {
-    return false;
-  }
-  request->body = raw + *bodyOffset;
-  request->bodyLen = rawLen - *bodyOffset;
-  *bodyStart = request->body;
-  return true;
-}
-
-/**
- * Purpose: Read one HTTP request from a socket with strict framing checks.
- * Inputs: clientFd socket, maxBodyBytes limit, destination buffer and output
- * pointers for bytes read and oversize flag.
- * Outputs: true when a full request is read; false on framing/IO errors.
- */
-bool ReadRequestFromSocket(int clientFd,
-                           size_t maxBodyBytes,
-                           unsigned char* out,
-                           size_t* outLen,
-                           bool* tooLarge) {
-  *outLen = 0;
-  *tooLarge = false;
-
-  size_t headerEnd = 0;
-  bool headerFound = false;
-  while (!headerFound) {
-    if (*outLen >= MAX_REQUEST_BYTES) {
-      return false;
-    }
-    const ssize_t n =
-        recv(clientFd, out + *outLen, MAX_REQUEST_BYTES - *outLen, 0);
-    if (n <= 0) {
-      return false;
-    }
-    *outLen += static_cast<size_t>(n);
-
-    for (size_t i = 0; i + 3U < *outLen; i++) {
-      if (out[i] == '\r' && out[i + 1U] == '\n' && out[i + 2U] == '\r' &&
-          out[i + 3U] == '\n') {
-        headerEnd = i;
-        headerFound = true;
-        break;
-      }
-    }
-
-    if (!headerFound && *outLen > 64U * 1024U) {
-      return false;
-    }
-  }
-
-  HttpRequest parsed;
-  unsigned char headerCopy[64U * 1024U + 4U];
-  const size_t headerBytes = headerEnd + 4U;
-  if (headerBytes > sizeof(headerCopy)) {
-    return false;
-  }
-  (void)std::memcpy(headerCopy, out, headerBytes);
-  const unsigned char* bodyStart = nullptr;
-  size_t bodyOffset = 0U;
-  if (!ParseHttpRequest(headerCopy, headerBytes, &parsed, &bodyStart,
-                        &bodyOffset)) {
-    return false;
-  }
-
-  size_t contentLength = 0U;
-  bool hasContentLength = false;
-  for (size_t i = 0; i < parsed.headerCount; i++) {
-    if (std::strcmp(parsed.headers[i].key, "transfer-encoding") == 0) {
-      return false;
-    }
-    if (std::strcmp(parsed.headers[i].key, "content-length") == 0) {
-      size_t candidate = 0U;
-      if (!ParseUnsignedSizeStrict(parsed.headers[i].value, &candidate)) {
-        return false;
-      }
-      if (!hasContentLength) {
-        contentLength = candidate;
-        hasContentLength = true;
-      } else if (contentLength != candidate) {
-        return false;
-      }
-    }
-  }
-
-  if (std::strcmp(parsed.method, "POST") == 0 && !hasContentLength) {
-    return false;
-  }
-
-  if (hasContentLength && contentLength > maxBodyBytes) {
-    *tooLarge = true;
-    return false;
-  }
-
-  const size_t needed = headerEnd + 4U + contentLength;
-  while (*outLen < needed) {
-    if (*outLen >= MAX_REQUEST_BYTES) {
-      return false;
-    }
-    const ssize_t n =
-        recv(clientFd, out + *outLen, MAX_REQUEST_BYTES - *outLen, 0);
-    if (n <= 0) {
-      return false;
-    }
-    *outLen += static_cast<size_t>(n);
-  }
-
-  if (hasContentLength && *outLen > needed) {
-    *outLen = needed;
-  }
-
-  return true;
-}
-
-/**
- * Purpose: Open SQLite database, enable pragmas, and apply schema migrations.
- * Inputs: `db` output handle; `dbPath` file path; `err/errSize` error buffer.
- * Outputs: Returns true with opened/migrated DB on success; false with error
- * text set.
- */
-bool DbOpen(sqlite3** db, const char* dbPath, char* err, size_t errSize) {
-  if (db == nullptr) {
-    (void)std::snprintf(err, errSize, "invalid database handle pointer");
-    return false;
-  }
-  const int openFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE;
-  if (sqlite3_open_v2(dbPath, db, openFlags, nullptr) != SQLITE_OK) {
-    const char* msg = "sqlite open failed";
-    if (*db != nullptr) {
-      msg = sqlite3_errmsg(*db);
-      (void)sqlite3_close(*db);
-      *db = nullptr;
-    }
-    (void)std::snprintf(err, errSize, "%s", msg);
-    return false;
-  }
-  sqlite3_extended_result_codes(*db, 1);
-
-  const char* migrationSql =
-      "PRAGMA journal_mode=DELETE;"
-      "PRAGMA synchronous=NORMAL;"
-      "PRAGMA busy_timeout=5000;"
-      "PRAGMA foreign_keys=ON;"
-      "CREATE TABLE IF NOT EXISTS pages ("
-      "id INTEGER PRIMARY KEY,"
-      "slug TEXT NOT NULL UNIQUE,"
-      "title TEXT NOT NULL,"
-      "markdown TEXT NOT NULL,"
-      "created_at TEXT NOT NULL,"
-      "updated_at TEXT NOT NULL"
-      ");"
-      "CREATE INDEX IF NOT EXISTS idx_pages_slug ON pages(slug);"
-      "CREATE TABLE IF NOT EXISTS page_links ("
-      "from_slug TEXT NOT NULL,"
-      "to_slug TEXT NOT NULL,"
-      "PRIMARY KEY (from_slug, to_slug)"
-      ");"
-      "CREATE INDEX IF NOT EXISTS idx_page_links_to ON page_links(to_slug);"
-      "CREATE TABLE IF NOT EXISTS images ("
-      "id INTEGER PRIMARY KEY,"
-      "page_slug TEXT NOT NULL,"
-      "filename TEXT NOT NULL,"
-      "mime_type TEXT NOT NULL,"
-      "data BLOB NOT NULL,"
-      "created_at TEXT NOT NULL"
-      ");"
-      "CREATE INDEX IF NOT EXISTS idx_images_page_slug ON images(page_slug);";
-
-  char* sqliteErr = nullptr;
-  if (sqlite3_exec(*db, migrationSql, nullptr, nullptr, &sqliteErr) !=
-      SQLITE_OK) {
-    (void)std::snprintf(err, errSize, "%s",
-                        sqliteErr == nullptr ? "sqlite error" : sqliteErr);
-    if (sqliteErr != nullptr) {
-      sqlite3_free(sqliteErr);
-    }
-    if (*db != nullptr) {
-      (void)sqlite3_close(*db);
-      *db = nullptr;
-    }
-    return false;
-  }
-
-  return true;
-}
-
-/**
- * Purpose: Load a wiki page row by slug from SQLite.
- * Inputs: db handle, slug key, page/found/error outputs.
- * Outputs: true on query success (including not-found); false on DB errors.
- */
-bool DbGetPage(sqlite3* db,
-               const char* slug,
-               PageRecord* page,
-               bool* found,
-               char* err,
-               size_t errSize) {
-  *found = false;
-  sqlite3_stmt* stmt = nullptr;
-  const char* sql =
-      "SELECT slug, title, markdown, created_at, updated_at FROM pages WHERE "
-      "slug = ?";
-
-  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    return false;
-  }
-
-  (void)sqlite3_bind_text(stmt, 1, slug, -1, SQLITE_TRANSIENT);
-  const int rc = sqlite3_step(stmt);
-  if (rc == SQLITE_ROW) {
-    const unsigned char* dbSlug = sqlite3_column_text(stmt, 0);
-    const unsigned char* dbTitle = sqlite3_column_text(stmt, 1);
-    const unsigned char* dbMarkdown = sqlite3_column_text(stmt, 2);
-    const unsigned char* dbCreated = sqlite3_column_text(stmt, 3);
-    const unsigned char* dbUpdated = sqlite3_column_text(stmt, 4);
-
-    if (dbSlug == nullptr || dbTitle == nullptr || dbMarkdown == nullptr ||
-        dbCreated == nullptr || dbUpdated == nullptr) {
-      (void)sqlite3_finalize(stmt);
-      (void)std::snprintf(err, errSize, "invalid database row");
-      return false;
-    }
-
-    if (!CopyString(page->slug, sizeof(page->slug),
-                    reinterpret_cast<const char*>(dbSlug)) ||
-        !CopyString(page->title, sizeof(page->title),
-                    reinterpret_cast<const char*>(dbTitle)) ||
-        !CopyString(page->createdAt, sizeof(page->createdAt),
-                    reinterpret_cast<const char*>(dbCreated)) ||
-        !CopyString(page->updatedAt, sizeof(page->updatedAt),
-                    reinterpret_cast<const char*>(dbUpdated))) {
-      (void)sqlite3_finalize(stmt);
-      (void)std::snprintf(err, errSize, "field too long");
-      return false;
-    }
-
-    const int markdownLen = sqlite3_column_bytes(stmt, 2);
-    if (markdownLen < 0 ||
-        static_cast<size_t>(markdownLen) + 1U > sizeof(page->markdown)) {
-      (void)sqlite3_finalize(stmt);
-      (void)std::snprintf(err, errSize, "markdown too large");
-      return false;
-    }
-    (void)std::memcpy(page->markdown, dbMarkdown,
-                      static_cast<size_t>(markdownLen));
-    page->markdown[markdownLen] = '\0';
-
-    *found = true;
-  } else if (rc != SQLITE_DONE) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    (void)sqlite3_finalize(stmt);
-    return false;
-  }
-
-  (void)sqlite3_finalize(stmt);
-  return true;
-}
-
-/**
- * Purpose: Extract and deduplicate wiki-link targets from markdown text.
- * Inputs: markdown source, destination link array/counter, maxLinks capacity.
- * Outputs: No return value; linkCount and links array are populated.
- */
-void ExtractWikiLinks(const char* markdown,
-                      char links[][MAX_SLUG],
-                      size_t* linkCount,
-                      size_t maxLinks) {
-  *linkCount = 0;
-  const size_t len = std::strlen(markdown);
-  size_t i = 0;
-  while (i + 3U < len) {
-    if (markdown[i] == '[' && markdown[i + 1U] == '[') {
-      size_t j = i + 2U;
-      while (j + 1U < len && !(markdown[j] == ']' && markdown[j + 1U] == ']')) {
-        j++;
-      }
-      if (j + 1U < len) {
-        char rawTarget[MAX_SLUG];
-        size_t k = 0;
-        size_t pos = i + 2U;
-        while (pos < j && markdown[pos] != '|' && k + 1U < sizeof(rawTarget)) {
-          rawTarget[k++] = markdown[pos++];
-        }
-        rawTarget[k] = '\0';
-
-        char slug[MAX_SLUG];
-        if (Slugify(rawTarget, slug, sizeof(slug))) {
-          bool duplicate = false;
-          for (size_t n = 0; n < *linkCount; n++) {
-            if (std::strcmp(links[n], slug) == 0) {
-              duplicate = true;
-              break;
-            }
-          }
-          if (!duplicate && *linkCount < maxLinks) {
-            (void)CopyString(links[*linkCount], MAX_SLUG, slug);
-            *linkCount += 1U;
-          }
-        }
-
-        i = j + 2U;
-        continue;
-      }
-    }
-    i++;
-  }
-}
-
-/**
- * Purpose: Insert or update a page and refresh its outbound wiki-link index.
- * Inputs: db handle, slug/title/markdown, error buffer.
- * Outputs: true when transaction commits; false on validation/DB failures.
- */
-bool DbUpsertPage(sqlite3* db,
-                  const char* slug,
-                  const char* title,
-                  const char* markdown,
-                  char* err,
-                  size_t errSize) {
-  char timestamp[MAX_TIMESTAMP];
-  NowIso8601(timestamp, sizeof(timestamp));
-
-  char* sqliteErr = nullptr;
-  if (sqlite3_exec(db, "BEGIN IMMEDIATE TRANSACTION;", nullptr, nullptr,
-                   &sqliteErr) != SQLITE_OK) {
-    (void)std::snprintf(
-        err, errSize, "%s",
-        sqliteErr == nullptr ? "begin transaction failed" : sqliteErr);
-    if (sqliteErr != nullptr) {
-      sqlite3_free(sqliteErr);
-    }
-    return false;
-  }
-
-  sqlite3_stmt* stmt = nullptr;
-  const char* upsertSql =
-      "INSERT INTO pages (slug, title, markdown, created_at, updated_at) "
-      "VALUES (?, ?, ?, ?, ?) "
-      "ON CONFLICT(slug) DO UPDATE SET title=excluded.title, "
-      "markdown=excluded.markdown, "
-      "updated_at=excluded.updated_at";
-
-  if (sqlite3_prepare_v2(db, upsertSql, -1, &stmt, nullptr) != SQLITE_OK) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-    return false;
-  }
-
-  (void)sqlite3_bind_text(stmt, 1, slug, -1, SQLITE_TRANSIENT);
-  (void)sqlite3_bind_text(stmt, 2, title, -1, SQLITE_TRANSIENT);
-  (void)sqlite3_bind_text(stmt, 3, markdown, -1, SQLITE_TRANSIENT);
-  (void)sqlite3_bind_text(stmt, 4, timestamp, -1, SQLITE_TRANSIENT);
-  (void)sqlite3_bind_text(stmt, 5, timestamp, -1, SQLITE_TRANSIENT);
-
-  if (sqlite3_step(stmt) != SQLITE_DONE) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    (void)sqlite3_finalize(stmt);
-    (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-    return false;
-  }
-  (void)sqlite3_finalize(stmt);
-
-  const char* deleteSql = "DELETE FROM page_links WHERE from_slug = ?";
-  if (sqlite3_prepare_v2(db, deleteSql, -1, &stmt, nullptr) != SQLITE_OK) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-    return false;
-  }
-  (void)sqlite3_bind_text(stmt, 1, slug, -1, SQLITE_TRANSIENT);
-  if (sqlite3_step(stmt) != SQLITE_DONE) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    (void)sqlite3_finalize(stmt);
-    (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-    return false;
-  }
-  (void)sqlite3_finalize(stmt);
-
-  char links[128][MAX_SLUG];
-  size_t linkCount = 0;
-  ExtractWikiLinks(markdown, links, &linkCount, 128U);
-
-  const char* insertLinkSql =
-      "INSERT OR IGNORE INTO page_links (from_slug, to_slug) VALUES (?, ?)";
-  if (sqlite3_prepare_v2(db, insertLinkSql, -1, &stmt, nullptr) != SQLITE_OK) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-    return false;
-  }
-
-  for (size_t i = 0; i < linkCount; i++) {
-    (void)sqlite3_reset(stmt);
-    (void)sqlite3_clear_bindings(stmt);
-    (void)sqlite3_bind_text(stmt, 1, slug, -1, SQLITE_TRANSIENT);
-    (void)sqlite3_bind_text(stmt, 2, links[i], -1, SQLITE_TRANSIENT);
-    if (sqlite3_step(stmt) != SQLITE_DONE) {
-      (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-      (void)sqlite3_finalize(stmt);
-      (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-      return false;
-    }
-  }
-  (void)sqlite3_finalize(stmt);
-
-  if (sqlite3_exec(db, "COMMIT;", nullptr, nullptr, &sqliteErr) != SQLITE_OK) {
-    (void)std::snprintf(err, errSize, "%s",
-                        sqliteErr == nullptr ? "commit failed" : sqliteErr);
-    if (sqliteErr != nullptr) {
-      sqlite3_free(sqliteErr);
-    }
-    (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-    return false;
-  }
-
-  return true;
-}
-
-/**
- * Purpose: Delete a page and all direct page-owned data by slug.
- * Inputs: db handle, slug key, and error output buffer.
- * Outputs: true when delete transaction commits; false on DB failures.
- */
-bool DbDeletePage(sqlite3* db, const char* slug, char* err, size_t errSize) {
-  char* sqliteErr = nullptr;
-  if (sqlite3_exec(db, "BEGIN IMMEDIATE TRANSACTION;", nullptr, nullptr,
-                   &sqliteErr) != SQLITE_OK) {
-    (void)std::snprintf(
-        err, errSize, "%s",
-        sqliteErr == nullptr ? "begin transaction failed" : sqliteErr);
-    if (sqliteErr != nullptr) {
-      sqlite3_free(sqliteErr);
-    }
-    return false;
-  }
-
-  struct DeleteStep {
-    const char* sql;
-    int bindCount;
-  };
-  static const DeleteStep STEPS[] = {
-      {"DELETE FROM page_links WHERE from_slug = ?", 1},
-      {"DELETE FROM page_links WHERE to_slug = ?", 1},
-      {"DELETE FROM images WHERE page_slug = ?", 1},
-      {"DELETE FROM pages WHERE slug = ?", 1},
-  };
-
-  for (size_t i = 0; i < sizeof(STEPS) / sizeof(STEPS[0]); i++) {
-    sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db, STEPS[i].sql, -1, &stmt, nullptr) != SQLITE_OK) {
-      (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-      (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-      return false;
-    }
-    if (STEPS[i].bindCount == 1) {
-      (void)sqlite3_bind_text(stmt, 1, slug, -1, SQLITE_TRANSIENT);
-    }
-    if (sqlite3_step(stmt) != SQLITE_DONE) {
-      (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-      (void)sqlite3_finalize(stmt);
-      (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-      return false;
-    }
-    (void)sqlite3_finalize(stmt);
-  }
-
-  if (sqlite3_exec(db, "COMMIT;", nullptr, nullptr, &sqliteErr) != SQLITE_OK) {
-    (void)std::snprintf(err, errSize, "%s",
-                        sqliteErr == nullptr ? "commit failed" : sqliteErr);
-    if (sqliteErr != nullptr) {
-      sqlite3_free(sqliteErr);
-    }
-    (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-    return false;
-  }
-
-  return true;
-}
-
-/**
- * Purpose: Query all pages and append HTML list items for index rendering.
- * Inputs: `db` read handle; `html` writable buffer; `err/errSize` error buffer.
- * Outputs: Returns true on success; false on DB/buffer errors with message in
- * `err`.
- */
-bool DbListPagesHtml(sqlite3* db, TextBuffer* html, char* err, size_t errSize) {
-  sqlite3_stmt* stmt = nullptr;
-  const char* sql = "SELECT slug, title FROM pages ORDER BY lower(title)";
-  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    return false;
-  }
-
-  bool done = false;
-  while (!done) {
-    const int rc = sqlite3_step(stmt);
-    if (rc == SQLITE_DONE) {
-      done = true;
-      continue;
-    }
-    if (rc != SQLITE_ROW) {
-      (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-
-    const char* slug =
-        reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-    const char* title =
-        reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-    if (slug == nullptr || title == nullptr) {
-      continue;
-    }
-
-    char encodedSlug[MAX_PATH];
-    if (!UrlEncode(slug, encodedSlug, sizeof(encodedSlug))) {
-      continue;
-    }
-
-    if (!BufferAppend(html, "<li><a href=\"/page/")) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (!BufferAppend(html, encodedSlug)) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (!BufferAppend(html, "\">")) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (!BufferAppendEscaped(html, title, std::strlen(title))) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (!BufferAppend(html, "</a> <span class=\"meta\">(")) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (!BufferAppendEscaped(html, slug, std::strlen(slug))) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (!BufferAppend(html, ")</span></li>")) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-  }
-
-  (void)sqlite3_finalize(stmt);
-  return true;
-}
-
-/**
- * Purpose: Append backlink list HTML for pages linking to `slug`.
- * Inputs: db handle, target slug, html output buffer, error buffer.
- * Outputs: true on success; false on DB/query or buffer append failures.
- */
-bool DbAppendBacklinksHtml(sqlite3* db,
-                           const char* slug,
-                           TextBuffer* html,
-                           char* err,
-                           size_t errSize) {
-  sqlite3_stmt* stmt = nullptr;
-  const char* sql =
-      "SELECT from_slug FROM page_links WHERE to_slug = ? ORDER BY from_slug";
-  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    return false;
-  }
-
-  (void)sqlite3_bind_text(stmt, 1, slug, -1, SQLITE_TRANSIENT);
-  bool any = false;
-  bool done = false;
-  while (!done) {
-    const int rc = sqlite3_step(stmt);
-    if (rc == SQLITE_DONE) {
-      done = true;
-      continue;
-    }
-    if (rc != SQLITE_ROW) {
-      (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    const char* fromSlug =
-        reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-    if (fromSlug == nullptr) {
-      continue;
-    }
-    if (!any) {
-      if (!BufferAppend(html, "<ul class=\"backlinks\">")) {
-        (void)sqlite3_finalize(stmt);
-        return false;
-      }
-      any = true;
-    }
-    char encoded[MAX_PATH];
-    if (!UrlEncode(fromSlug, encoded, sizeof(encoded))) {
-      continue;
-    }
-    if (!BufferAppend(html, "<li><a href=\"/page/")) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (!BufferAppend(html, encoded)) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (!BufferAppend(html, "\">")) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (!BufferAppendEscaped(html, fromSlug, std::strlen(fromSlug))) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (!BufferAppend(html, "</a></li>")) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-  }
-
-  if (!any) {
-    if (!BufferAppend(html, "<p class=\"meta\">No backlinks yet.</p>")) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-  } else {
-    if (!BufferAppend(html, "</ul>")) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-  }
-
-  (void)sqlite3_finalize(stmt);
-  return true;
-}
-
-/**
- * Purpose: Append page-image list HTML including markdown snippets/actions.
- * Inputs: db handle, page slug, html output buffer, insert-button toggle,
- * error buffer.
- * Outputs: true on success; false on DB/query or buffer append failures.
- */
-bool DbAppendImagesHtml(sqlite3* db,
-                        const char* slug,
-                        TextBuffer* html,
-                        bool includeInsertButtons,
-                        char* err,
-                        size_t errSize) {
-  sqlite3_stmt* stmt = nullptr;
-  const char* sql =
-      "SELECT id, filename FROM images WHERE page_slug = ? ORDER BY id DESC";
-  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    return false;
-  }
-
-  (void)sqlite3_bind_text(stmt, 1, slug, -1, SQLITE_TRANSIENT);
-  bool any = false;
-  bool done = false;
-  while (!done) {
-    const int rc = sqlite3_step(stmt);
-    if (rc == SQLITE_DONE) {
-      done = true;
-      continue;
-    }
-    if (rc != SQLITE_ROW) {
-      (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-
-    const int id = sqlite3_column_int(stmt, 0);
-    const char* filename =
-        reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-    if (filename == nullptr) {
-      continue;
-    }
-
-    if (!any) {
-      if (!BufferAppend(html, "<ul class=\"images\">")) {
-        (void)sqlite3_finalize(stmt);
-        return false;
-      }
-      any = true;
-    }
-
-    char encodedSlug[MAX_PATH];
-    if (!UrlEncode(slug, encodedSlug, sizeof(encodedSlug))) {
-      continue;
-    }
-
-    if (!BufferAppendFormat(html, "<li><a href=\"/image/%d\">", id)) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (!BufferAppendEscaped(html, filename, std::strlen(filename))) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    char snippet[512];
-    if (std::snprintf(snippet, sizeof(snippet), "![%s](/image/%d)", filename,
-                      id) < 0) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-
-    if (!BufferAppend(html, "</a> (<code>")) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (!BufferAppendEscaped(html, snippet, std::strlen(snippet))) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (!BufferAppend(html, "</code>) ")) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-    if (includeInsertButtons) {
-      if (!BufferAppend(html,
-                        "<button type=\"button\" class=\"md-insert-image\" "
-                        "data-md-snippet=\"")) {
-        (void)sqlite3_finalize(stmt);
-        return false;
-      }
-      if (!BufferAppendEscaped(html, snippet, std::strlen(snippet))) {
-        (void)sqlite3_finalize(stmt);
-        return false;
-      }
-      if (!BufferAppend(html, "\">Insert</button> ")) {
-        (void)sqlite3_finalize(stmt);
-        return false;
-      }
-      if (!BufferAppendFormat(
-              html,
-              "<form class=\"inline-delete\" method=\"post\" "
-              "onsubmit=\"return confirm('Delete this image?');\" "
-              "action=\"/images/delete/%d/",
-              id)) {
-        (void)sqlite3_finalize(stmt);
-        return false;
-      }
-      if (!BufferAppend(html, encodedSlug)) {
-        (void)sqlite3_finalize(stmt);
-        return false;
-      }
-      if (!BufferAppend(html,
-                        "\"><button type=\"submit\" "
-                        "class=\"md-insert-image delete-button\">"
-                        "Delete image</button></form>")) {
-        (void)sqlite3_finalize(stmt);
-        return false;
-      }
-    }
-    if (!BufferAppend(html, "</li>")) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-  }
-
-  if (!any) {
-    if (!BufferAppend(
-            html, "<p class=\"meta\">No images uploaded for this page.</p>")) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-  } else {
-    if (!BufferAppend(html, "</ul>")) {
-      (void)sqlite3_finalize(stmt);
-      return false;
-    }
-  }
-
-  (void)sqlite3_finalize(stmt);
-  return true;
-}
-
-/**
- * Purpose: Insert a new image blob and metadata row into SQLite.
- * Inputs: db handle, page slug, filename, server-validated mime type, image
- * bytes/length, output imageId, error buffer.
- * Outputs: true on insert success; false on DB/constraint failures.
- */
-bool DbInsertImage(sqlite3* db,
-                   const char* pageSlug,
-                   const char* filename,
-                   const char* mimeType,
-                   const unsigned char* data,
-                   size_t dataLen,
-                   int* imageId,
-                   char* err,
-                   size_t errSize) {
-  sqlite3_stmt* stmt = nullptr;
-  const char* sql =
-      "INSERT INTO images (page_slug, filename, mime_type, data, created_at) "
-      "VALUES (?, ?, ?, ?, ?)";
-  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    return false;
-  }
-
-  char timestamp[MAX_TIMESTAMP];
-  NowIso8601(timestamp, sizeof(timestamp));
-
-  (void)sqlite3_bind_text(stmt, 1, pageSlug, -1, SQLITE_TRANSIENT);
-  (void)sqlite3_bind_text(stmt, 2, filename, -1, SQLITE_TRANSIENT);
-  (void)sqlite3_bind_text(stmt, 3, mimeType, -1, SQLITE_TRANSIENT);
-  (void)sqlite3_bind_blob(stmt, 4, data, static_cast<int>(dataLen),
-                          SQLITE_TRANSIENT);
-  (void)sqlite3_bind_text(stmt, 5, timestamp, -1, SQLITE_TRANSIENT);
-
-  if (sqlite3_step(stmt) != SQLITE_DONE) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    (void)sqlite3_finalize(stmt);
-    return false;
-  }
-
-  *imageId = static_cast<int>(sqlite3_last_insert_rowid(db));
-  (void)sqlite3_finalize(stmt);
-  return true;
-}
-
-/**
- * Purpose: Load one image blob row by numeric image id.
- * Inputs: db handle, image id, mime/data outputs, statement output, found flag,
- * error buffer.
- * Outputs: true on query success (including not-found); false on DB errors.
- */
-bool DbGetImage(sqlite3* db,
-                int id,
-                char* mimeType,
-                size_t mimeTypeSize,
-                const unsigned char** data,
-                int* dataLen,
-                sqlite3_stmt** stmtOut,
-                bool* found,
-                char* err,
-                size_t errSize) {
-  *found = false;
-  *stmtOut = nullptr;
-
-  sqlite3_stmt* stmt = nullptr;
-  const char* sql = "SELECT mime_type, data FROM images WHERE id = ?";
-  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    return false;
-  }
-
-  (void)sqlite3_bind_int(stmt, 1, id);
-  const int rc = sqlite3_step(stmt);
-  if (rc == SQLITE_DONE) {
-    (void)sqlite3_finalize(stmt);
-    *found = false;
-    return true;
-  }
-  if (rc != SQLITE_ROW) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    (void)sqlite3_finalize(stmt);
-    return false;
-  }
-
-  const char* dbMime =
-      reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-  const unsigned char* dbData =
-      reinterpret_cast<const unsigned char*>(sqlite3_column_blob(stmt, 1));
-  const int blobSize = sqlite3_column_bytes(stmt, 1);
-  if (dbMime == nullptr || dbData == nullptr || blobSize < 0) {
-    (void)sqlite3_finalize(stmt);
-    (void)std::snprintf(err, errSize, "invalid image row");
-    return false;
-  }
-
-  if (!CopyString(mimeType, mimeTypeSize, dbMime)) {
-    (void)sqlite3_finalize(stmt);
-    (void)std::snprintf(err, errSize, "mime type too long");
-    return false;
-  }
-
-  *data = dbData;
-  *dataLen = blobSize;
-  *stmtOut = stmt;
-  *found = true;
-  return true;
-}
-
-/**
- * Purpose: Delete an image row scoped to the owning page slug.
- * Inputs: db handle, image id, page slug, error buffer.
- * Outputs: true on successful delete statement execution; false on DB errors.
- */
-bool DbDeleteImage(sqlite3* db,
-                   int id,
-                   const char* pageSlug,
-                   char* err,
-                   size_t errSize) {
-  sqlite3_stmt* stmt = nullptr;
-  const char* sql = "DELETE FROM images WHERE id = ? AND page_slug = ?";
-  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    return false;
-  }
-  (void)sqlite3_bind_int(stmt, 1, id);
-  (void)sqlite3_bind_text(stmt, 2, pageSlug, -1, SQLITE_TRANSIENT);
-  if (sqlite3_step(stmt) != SQLITE_DONE) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
-    (void)sqlite3_finalize(stmt);
-    return false;
-  }
-  (void)sqlite3_finalize(stmt);
-  return true;
-}
-
-/**
- * Purpose: Locate the first occurrence of a byte subsequence.
- * Inputs: haystack pointer/length, needle pointer/length.
- * Outputs: Pointer to match start in haystack, or nullptr when not found.
- */
-const unsigned char* FindBytes(const unsigned char* haystack,
-                               size_t haystackLen,
-                               const unsigned char* needle,
-                               size_t needleLen) {
-  if (needleLen == 0U || haystackLen < needleLen) {
-    return nullptr;
-  }
-  for (size_t i = 0; i + needleLen <= haystackLen; i++) {
-    if (std::memcmp(haystack + i, needle, needleLen) == 0) {
-      return haystack + i;
-    }
-  }
-  return nullptr;
-}
-
-/**
- * Purpose: Parse multipart/form-data payload and extract first `image` part.
- * Inputs: `request` parsed HTTP request with body and content-type header;
- * `image` writable output structure.
- * Outputs: No return value; sets `image->valid` and fills filename/mime/data
- * pointers when an image part is found.
- */
-void ParseMultipartImage(const HttpRequest* request, MultipartImage* image) {
-  image->valid = false;
-
-  const char* contentType = FindHeader(request, "content-type");
-  if (contentType == nullptr) {
-    return;
-  }
-
-  const char* boundaryPos = std::strstr(contentType, "boundary=");
-  if (boundaryPos == nullptr) {
-    return;
-  }
-  boundaryPos += 9;
-  while (*boundaryPos == ' ' || *boundaryPos == '\t') {
-    boundaryPos++;
-  }
-
-  const char* boundaryEnd = boundaryPos;
-  if (*boundaryPos == '"') {
-    boundaryPos++;
-    boundaryEnd = boundaryPos;
-    while (*boundaryEnd != '\0' && *boundaryEnd != '"') {
-      boundaryEnd++;
-    }
-    if (*boundaryEnd != '"') {
-      return;
-    }
-  } else {
-    while (*boundaryEnd != '\0' && *boundaryEnd != ';' && *boundaryEnd != ' ' &&
-           *boundaryEnd != '\t') {
-      boundaryEnd++;
-    }
-  }
-
-  char boundary[128];
-  const size_t boundaryLen = static_cast<size_t>(boundaryEnd - boundaryPos);
-  if (boundaryLen == 0U || boundaryLen + 1U > sizeof(boundary)) {
-    return;
-  }
-  (void)std::memcpy(boundary, boundaryPos, boundaryLen);
-  boundary[boundaryLen] = '\0';
-
-  char delimiter[160];
-  if (std::snprintf(delimiter, sizeof(delimiter), "--%s", boundary) < 0) {
-    return;
-  }
-
-  const unsigned char* body = request->body;
-  const size_t bodyLen = request->bodyLen;
-  const unsigned char* search = body;
-  size_t remaining = bodyLen;
-
-  while (remaining > 0U) {
-    const unsigned char* partStart = FindBytes(
-        search, remaining, reinterpret_cast<const unsigned char*>(delimiter),
-        std::strlen(delimiter));
-    if (partStart == nullptr) {
-      return;
-    }
-
-    const size_t consumed = static_cast<size_t>(partStart - search);
-    search += consumed;
-    remaining -= consumed;
-
-    if (remaining < std::strlen(delimiter) + 2U) {
-      return;
-    }
-    search += std::strlen(delimiter);
-    remaining -= std::strlen(delimiter);
-
-    if (remaining >= 2U && search[0] == '-' && search[1] == '-') {
-      return;
-    }
-
-    if (remaining < 2U || search[0] != '\r' || search[1] != '\n') {
-      return;
-    }
-    search += 2U;
-    remaining -= 2U;
-
-    const unsigned char* headerEnd =
-        FindBytes(search, remaining,
-                  reinterpret_cast<const unsigned char*>("\r\n\r\n"), 4U);
-    if (headerEnd == nullptr) {
-      return;
-    }
-
-    size_t headerLen = static_cast<size_t>(headerEnd - search);
-    if (headerLen >= 1024U) {
-      return;
-    }
-
-    char headerText[1024];
-    (void)std::memcpy(headerText, search, headerLen);
-    headerText[headerLen] = '\0';
-
-    search = headerEnd + 4U;
-    remaining = bodyLen - static_cast<size_t>(search - body);
-
-    char disposition[512];
-    disposition[0] = '\0';
-    char partMime[MAX_MIME];
-    partMime[0] = '\0';
-
-    char* line = headerText;
-    while (line[0] != '\0') {
-      char* next = std::strstr(line, "\r\n");
-      if (next != nullptr) {
-        *next = '\0';
-      }
-
-      if (strncasecmp(line, "Content-Disposition:", 20) == 0) {
-        (void)CopyString(disposition, sizeof(disposition), line + 20);
-        TrimInPlace(disposition);
-      } else if (strncasecmp(line, "Content-Type:", 13) == 0) {
-        (void)CopyString(partMime, sizeof(partMime), line + 13);
-        TrimInPlace(partMime);
-      }
-
-      if (next == nullptr) {
-        break;
-      }
-      line = next + 2;
-    }
-
-    const bool isImageField =
-        std::strstr(disposition, "name=\"image\"") != nullptr;
-
-    const unsigned char* dataEnd = FindBytes(
-        search, remaining, reinterpret_cast<const unsigned char*>("\r\n"), 2U);
-    if (dataEnd == nullptr) {
-      return;
-    }
-
-    bool foundPartEnd = false;
-    while (!foundPartEnd) {
-      const unsigned char* candidate =
-          FindBytes(dataEnd, bodyLen - static_cast<size_t>(dataEnd - body),
-                    reinterpret_cast<const unsigned char*>("\r\n"), 2U);
-      if (candidate == nullptr) {
-        return;
-      }
-
-      const size_t afterCrLfOffset = static_cast<size_t>(candidate - body) + 2U;
-      if (afterCrLfOffset + std::strlen(delimiter) <= bodyLen &&
-          std::memcmp(body + afterCrLfOffset, delimiter,
-                      std::strlen(delimiter)) == 0) {
-        dataEnd = candidate;
-        foundPartEnd = true;
-        continue;
-      }
-      dataEnd = candidate + 2U;
-    }
-
-    const size_t partDataLen = static_cast<size_t>(dataEnd - search);
-
-    if (isImageField) {
-      char filename[MAX_FILENAME];
-      filename[0] = '\0';
-      const char* fn = std::strstr(disposition, "filename=\"");
-      if (fn != nullptr) {
-        fn += 10;
-        const char* end = std::strchr(fn, '"');
-        if (end != nullptr) {
-          const size_t len = static_cast<size_t>(end - fn);
-          if (len + 1U < sizeof(filename)) {
-            (void)std::memcpy(filename, fn, len);
-            filename[len] = '\0';
-          }
-        }
-      }
-      if (filename[0] == '\0') {
-        (void)CopyString(filename, sizeof(filename), "upload.bin");
-      }
-
-      (void)CopyString(image->filename, sizeof(image->filename), filename);
-      if (partMime[0] == '\0') {
-        (void)CopyString(image->mimeType, sizeof(image->mimeType),
-                         "application/octet-stream");
-      } else {
-        (void)CopyString(image->mimeType, sizeof(image->mimeType), partMime);
-      }
-      image->data = search;
-      image->dataLen = partDataLen;
-      image->valid = (partDataLen > 0U);
-      return;
-    }
-
-    const size_t nextStartOffset = static_cast<size_t>(dataEnd - body) + 2U;
-    if (nextStartOffset >= bodyLen) {
-      return;
-    }
-    search = body + nextStartOffset;
-    remaining = bodyLen - nextStartOffset;
-  }
-}
-
-/**
- * Purpose: Parse one URL-encoded key-value field from request body.
- * Inputs: `request` with form body; `key` field name; `out/outSize`
- * destination. Outputs: Returns true and writes decoded value when key exists;
- * false otherwise.
- */
-bool ParseFormField(const HttpRequest* request,
-                    const char* key,
-                    char* out,
-                    size_t outSize) {
-  if (out == nullptr || outSize == 0U) {
-    return false;
-  }
-  out[0] = '\0';
-  if (request->bodyLen == 0U || request->body == nullptr) {
-    return false;
-  }
-
-  char needle[64];
-  if (std::snprintf(needle, sizeof(needle), "%s=", key) < 0) {
-    return false;
-  }
-
-  const char* body = reinterpret_cast<const char*>(request->body);
-  size_t pos = 0;
-  while (pos < request->bodyLen) {
-    size_t end = pos;
-    while (end < request->bodyLen && body[end] != '&') {
-      end++;
-    }
-
-    const size_t tokenLen = end - pos;
-    if (tokenLen >= std::strlen(needle) &&
-        std::strncmp(body + pos, needle, std::strlen(needle)) == 0) {
-      const char* encodedValue = body + pos + std::strlen(needle);
-      const size_t encodedLen = tokenLen - std::strlen(needle);
-      return UrlDecodeStrict(out, outSize, encodedValue, encodedLen, nullptr);
-    }
-
-    if (end >= request->bodyLen) {
-      break;
-    }
-    pos = end + 1U;
-  }
-
-  return false;
-}
-
-/**
- * Purpose: Parse a markdown footnote-definition line (`[^id]: text`).
- * Inputs: line pointer/length and writable destination buffers for id/text.
- * Outputs: Returns true when line is a valid definition and outputs are
- * written.
- */
-bool ParseFootnoteDefinitionLine(const char* line,
-                                 size_t lineLen,
-                                 char* id,
-                                 size_t idSize,
-                                 char* text,
-                                 size_t textSize) {
-  if (lineLen < 6U || line[0] != '[' || line[1] != '^') {
-    return false;
-  }
-  size_t i = 2U;
-  size_t idLen = 0U;
-  while (i < lineLen && line[i] != ']') {
-    const char ch = line[i];
-    const bool safeIdChar =
-        ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-         (ch >= '0' && ch <= '9') || ch == '-' || ch == '_');
-    if (!safeIdChar) {
-      return false;
-    }
-    if (idLen + 1U >= idSize) {
-      return false;
-    }
-    id[idLen++] = line[i++];
-  }
-  if (i + 2U >= lineLen || line[i] != ']' || line[i + 1U] != ':') {
-    return false;
-  }
-  i += 2U;
-  while (i < lineLen && line[i] == ' ') {
-    i++;
-  }
-  size_t textLen = 0U;
-  while (i < lineLen) {
-    if (textLen + 1U >= textSize) {
-      return false;
-    }
-    text[textLen++] = line[i++];
-  }
-  id[idLen] = '\0';
-  text[textLen] = '\0';
-  return idLen > 0U;
-}
-
-/**
- * Purpose: Determine if markdown URL target uses a permitted scheme/prefix.
- * Inputs: URL text pointer/length and whether `mailto:` is allowed.
- * Outputs: Returns true for safe links/images; false for dangerous schemes.
- */
-bool IsSafeMarkdownUrl(const char* url, size_t len, bool allowMailto) {
-  if (url == nullptr || len == 0U) {
-    return false;
-  }
-  size_t start = 0U;
-  while (start < len && (url[start] == ' ' || url[start] == '\t')) {
-    start++;
-  }
-  while (len > start && (url[len - 1U] == ' ' || url[len - 1U] == '\t')) {
-    len--;
-  }
-  if (start >= len) {
-    return false;
-  }
-
-  const char first = url[start];
-  if (first == '/' || first == '#') {
-    return true;
-  }
-  if (len - start >= 2U && url[start] == '.' && url[start + 1U] == '/') {
-    return true;
-  }
-  if (len - start >= 3U && url[start] == '.' && url[start + 1U] == '.' &&
-      url[start + 2U] == '/') {
-    return true;
-  }
-
-  size_t colonPos = static_cast<size_t>(-1);
-  for (size_t i = start; i < len; i++) {
-    const char ch = url[i];
-    if (ch == ':') {
-      colonPos = i;
-      break;
-    }
-    if (ch == '/' || ch == '?' || ch == '#') {
-      break;
-    }
-  }
-  if (colonPos == static_cast<size_t>(-1)) {
-    return true;
-  }
-
-  char scheme[16];
-  const size_t schemeLen = colonPos - start;
-  if (schemeLen == 0U || schemeLen + 1U > sizeof(scheme)) {
-    return false;
-  }
-  for (size_t i = 0; i < schemeLen; i++) {
-    scheme[i] = static_cast<char>(ToLowerAscii(url[start + i]));
-  }
-  scheme[schemeLen] = '\0';
-
-  if (std::strcmp(scheme, "http") == 0 || std::strcmp(scheme, "https") == 0) {
-    return true;
-  }
-  if (allowMailto && std::strcmp(scheme, "mailto") == 0) {
-    return true;
-  }
-  return false;
-}
-
-/**
- * Purpose: Find closing `)` for markdown link/image target with nested parens.
- * Inputs: text span and index pointing at first character after opening `(`.
- * Outputs: true with `closeParenOut` set when a matching close is found.
- */
-bool FindMarkdownLinkCloseParen(const char* text,
-                                size_t len,
-                                size_t start,
-                                size_t* closeParenOut) {
-  size_t depth = 0U;
-  for (size_t i = start; i < len; i++) {
-    if (text[i] == '\\' && i + 1U < len) {
-      i++;
-      continue;
-    }
-    if (text[i] == '(') {
-      depth++;
-      continue;
-    }
-    if (text[i] == ')') {
-      if (depth == 0U) {
-        *closeParenOut = i;
-        return true;
-      }
-      depth--;
-    }
-  }
-  return false;
-}
-
-/**
- * Purpose: Find footnote identifier index in the collected footnote table.
- * Inputs: `ids` array, `count` active entries, and target `id`.
- * Outputs: Returns non-negative index when found; -1 when missing.
- */
-int FindFootnoteIndex(const char ids[][MAX_FOOTNOTE_ID],
-                      size_t count,
-                      const char* id) {
-  for (size_t i = 0; i < count; i++) {
-    if (std::strcmp(ids[i], id) == 0) {
-      return static_cast<int>(i);
-    }
-  }
-  return -1;
-}
-
-/**
- * Purpose: Convert one markdown line into inline HTML with links/notes/images.
- * Inputs: destination buffer, source text span, footnote metadata, and mutable
- * numbering state.
- * Outputs: Returns true on successful append; false on parse/buffer overflow.
- */
-bool WriteInlineMarkdown(TextBuffer* out,
-                         const char* text,
-                         size_t len,
-                         const char footnoteIds[][MAX_FOOTNOTE_ID],
-                         const char footnoteText[][MAX_FOOTNOTE_TEXT],
-                         size_t footnoteCount,
-                         int* footnoteOrder,
-                         int* nextFootnoteNumber) {
-  size_t i = 0;
-  while (i < len) {
-    if (i + 5U < len && text[i] == '!' && text[i + 1U] == '[') {
-      size_t closeBracket = i + 2U;
-      while (closeBracket < len && text[closeBracket] != ']') {
-        closeBracket++;
-      }
-      if (closeBracket + 1U < len && text[closeBracket + 1U] == '(') {
-        size_t closeParen = 0U;
-        if (FindMarkdownLinkCloseParen(text, len, closeBracket + 2U,
-                                       &closeParen)) {
-          const size_t urlLen = closeParen - (closeBracket + 2U);
-          if (!IsSafeMarkdownUrl(text + closeBracket + 2U, urlLen, false)) {
-            if (!BufferAppendEscaped(out, text + i, closeParen + 1U - i)) {
-              return false;
-            }
-            i = closeParen + 1U;
-            continue;
-          }
-          if (!BufferAppend(out,
-                            "<figure class=\"margin-figure\"><a href=\"")) {
-            return false;
-          }
-          if (!BufferAppendEscaped(out, text + closeBracket + 2U,
-                                   closeParen - (closeBracket + 2U))) {
-            return false;
-          }
-          if (!BufferAppend(
-                  out, "\" target=\"_blank\" rel=\"noopener\"><img src=\"")) {
-            return false;
-          }
-          if (!BufferAppendEscaped(out, text + closeBracket + 2U,
-                                   closeParen - (closeBracket + 2U))) {
-            return false;
-          }
-          if (!BufferAppend(out, "\" alt=\"")) {
-            return false;
-          }
-          if (!BufferAppendEscaped(out, text + i + 2U,
-                                   closeBracket - (i + 2U))) {
-            return false;
-          }
-          if (!BufferAppend(out, "\" loading=\"lazy\"></a><figcaption>")) {
-            return false;
-          }
-          if (!BufferAppendEscaped(out, text + i + 2U,
-                                   closeBracket - (i + 2U))) {
-            return false;
-          }
-          if (!BufferAppend(out, "</figcaption></figure>")) {
-            return false;
-          }
-          i = closeParen + 1U;
-          continue;
-        }
-      }
-    }
-
-    if (i + 3U < len && text[i] == '[' && text[i + 1U] == '^') {
-      size_t closeBracket = i + 2U;
-      while (closeBracket < len && text[closeBracket] != ']') {
-        closeBracket++;
-      }
-      if (closeBracket < len) {
-        char id[MAX_FOOTNOTE_ID];
-        size_t idLen = 0U;
-        for (size_t j = i + 2U; j < closeBracket; j++) {
-          if (idLen + 1U >= sizeof(id)) {
-            break;
-          }
-          id[idLen++] = text[j];
-        }
-        id[idLen] = '\0';
-        const int idx = FindFootnoteIndex(footnoteIds, footnoteCount, id);
-        if (idx >= 0) {
-          if (footnoteOrder[idx] == 0) {
-            footnoteOrder[idx] = *nextFootnoteNumber;
-            *nextFootnoteNumber += 1;
-          }
-          const int number = footnoteOrder[idx];
-          if (!BufferAppendFormat(
-                  out,
-                  "<sup class=\"footnote-ref\"><a href=\"#fn-%s\">%d</a></sup>"
-                  "<span class=\"sidenote\" id=\"sidenote-%s\"><span "
-                  "class=\"sidenote-number\">%d.</span> ",
-                  footnoteIds[idx], number, footnoteIds[idx], number)) {
-            return false;
-          }
-          if (!BufferAppendEscaped(out, footnoteText[idx],
-                                   std::strlen(footnoteText[idx]))) {
-            return false;
-          }
-          if (!BufferAppend(out, "</span>")) {
-            return false;
-          }
-          i = closeBracket + 1U;
-          continue;
-        }
-      }
-    }
-
-    if (i + 3U < len && text[i] == '[' && text[i + 1U] == '[') {
-      size_t end = i + 2U;
-      while (end + 1U < len && !(text[end] == ']' && text[end + 1U] == ']')) {
-        end++;
-      }
-      if (end + 1U < len) {
-        char targetRaw[MAX_SLUG];
-        char labelRaw[MAX_TITLE];
-        size_t targetLen = 0;
-        size_t labelLen = 0;
-        bool split = false;
-
-        for (size_t j = i + 2U; j < end; j++) {
-          if (text[j] == '|' && !split) {
-            split = true;
-            continue;
-          }
-          if (!split) {
-            if (targetLen + 1U < sizeof(targetRaw)) {
-              targetRaw[targetLen++] = text[j];
-            }
-          } else {
-            if (labelLen + 1U < sizeof(labelRaw)) {
-              labelRaw[labelLen++] = text[j];
-            }
-          }
-        }
-
-        targetRaw[targetLen] = '\0';
-        labelRaw[labelLen] = '\0';
-        if (!split) {
-          (void)CopyString(labelRaw, sizeof(labelRaw), targetRaw);
-        }
-
-        char slug[MAX_SLUG];
-        if (!Slugify(targetRaw, slug, sizeof(slug))) {
-          if (!BufferAppendEscaped(out, text + i, end + 2U - i)) {
-            return false;
-          }
-          i = end + 2U;
-          continue;
-        }
-
-        char encodedSlug[MAX_PATH];
-        if (!UrlEncode(slug, encodedSlug, sizeof(encodedSlug))) {
-          return false;
-        }
-
-        if (!BufferAppend(out, "<a class=\"wiki-link\" href=\"/page/")) {
-          return false;
-        }
-        if (!BufferAppend(out, encodedSlug)) {
-          return false;
-        }
-        if (!BufferAppend(out, "\">")) {
-          return false;
-        }
-        if (!BufferAppendEscaped(out, labelRaw, std::strlen(labelRaw))) {
-          return false;
-        }
-        if (!BufferAppend(out, "</a>")) {
-          return false;
-        }
-
-        i = end + 2U;
-        continue;
-      }
-    }
-
-    if (i + 4U < len && text[i] == '[') {
-      size_t closeBracket = i + 1U;
-      while (closeBracket < len && text[closeBracket] != ']') {
-        closeBracket++;
-      }
-      if (closeBracket + 1U < len && text[closeBracket + 1U] == '(') {
-        size_t closeParen = 0U;
-        if (FindMarkdownLinkCloseParen(text, len, closeBracket + 2U,
-                                       &closeParen)) {
-          const size_t urlLen = closeParen - (closeBracket + 2U);
-          if (!IsSafeMarkdownUrl(text + closeBracket + 2U, urlLen, true)) {
-            if (!BufferAppendEscaped(out, text + i, closeParen + 1U - i)) {
-              return false;
-            }
-            i = closeParen + 1U;
-            continue;
-          }
-          if (!BufferAppend(out, "<a href=\"")) {
-            return false;
-          }
-          if (!BufferAppendEscaped(out, text + closeBracket + 2U,
-                                   closeParen - (closeBracket + 2U))) {
-            return false;
-          }
-          if (!BufferAppend(out, "\">")) {
-            return false;
-          }
-          if (!BufferAppendEscaped(out, text + i + 1U,
-                                   closeBracket - (i + 1U))) {
-            return false;
-          }
-          if (!BufferAppend(out, "</a>")) {
-            return false;
-          }
-          i = closeParen + 1U;
-          continue;
-        }
-      }
-    }
-
-    if (!BufferAppendEscaped(out, text + i, 1U)) {
-      return false;
-    }
-    i++;
-  }
-
-  return true;
-}
-
-/**
- * Purpose: Render supported markdown subset to HTML, including wiki links,
- * sidenotes, and margin images.
- * Inputs: `markdown` source text and writable `html` output buffer.
- * Outputs: Returns true when rendering succeeds; false on invalid/bounded
- * output.
- */
-bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
-  const size_t len = std::strlen(markdown);
-  char footnoteIds[MAX_FOOTNOTES][MAX_FOOTNOTE_ID];
-  char footnoteText[MAX_FOOTNOTES][MAX_FOOTNOTE_TEXT];
-  int footnoteOrder[MAX_FOOTNOTES];
-  size_t footnoteCount = 0U;
-  int nextFootnoteNumber = 1;
-  for (size_t i = 0; i < MAX_FOOTNOTES; i++) {
-    footnoteOrder[i] = 0;
-  }
-
-  size_t scanStart = 0;
-  while (scanStart <= len) {
-    size_t scanEnd = scanStart;
-    while (scanEnd < len && markdown[scanEnd] != '\n') {
-      scanEnd++;
-    }
-    size_t lineLen = scanEnd - scanStart;
-    if (lineLen > 0U && markdown[scanEnd - 1U] == '\r') {
-      lineLen--;
-    }
-    char id[MAX_FOOTNOTE_ID];
-    char text[MAX_FOOTNOTE_TEXT];
-    if (footnoteCount < MAX_FOOTNOTES &&
-        ParseFootnoteDefinitionLine(markdown + scanStart, lineLen, id,
-                                    sizeof(id), text, sizeof(text))) {
-      (void)CopyString(footnoteIds[footnoteCount], sizeof(footnoteIds[0]), id);
-      (void)CopyString(footnoteText[footnoteCount], sizeof(footnoteText[0]),
-                       text);
-      footnoteCount += 1U;
-    }
-    if (scanEnd == len) {
-      break;
-    }
-    scanStart = scanEnd + 1U;
-  }
-
-  size_t lineStart = 0;
-  bool inCodeBlock = false;
-  bool inList = false;
-
-  while (lineStart <= len) {
-    size_t lineEnd = lineStart;
-    while (lineEnd < len && markdown[lineEnd] != '\n') {
-      lineEnd++;
-    }
-
-    size_t lineLen = lineEnd - lineStart;
-    if (lineLen > 0U && markdown[lineEnd - 1U] == '\r') {
-      lineLen--;
-    }
-
-    const char* line = markdown + lineStart;
-    char footId[MAX_FOOTNOTE_ID];
-    char footText[MAX_FOOTNOTE_TEXT];
-    if (ParseFootnoteDefinitionLine(line, lineLen, footId, sizeof(footId),
-                                    footText, sizeof(footText))) {
-      if (lineEnd == len) {
-        break;
-      }
-      lineStart = lineEnd + 1U;
-      continue;
-    }
-
-    if (lineLen >= 3U && std::strncmp(line, "```", 3) == 0) {
-      if (inList) {
-        if (!BufferAppend(html, "</ul>")) {
-          return false;
-        }
-        inList = false;
-      }
-      if (!inCodeBlock) {
-        if (!BufferAppend(html, "<pre><code>")) {
-          return false;
-        }
-        inCodeBlock = true;
-      } else {
-        if (!BufferAppend(html, "</code></pre>")) {
-          return false;
-        }
-        inCodeBlock = false;
-      }
-    } else if (inCodeBlock) {
-      if (!BufferAppendEscaped(html, line, lineLen)) {
-        return false;
-      }
-      if (!BufferAppend(html, "\n")) {
-        return false;
-      }
-    } else if (lineLen == 0U) {
-      if (inList) {
-        if (!BufferAppend(html, "</ul>")) {
-          return false;
-        }
-        inList = false;
-      }
-    } else if (lineLen > 2U && (line[0] == '-' || line[0] == '*') &&
-               line[1] == ' ') {
-      if (!inList) {
-        if (!BufferAppend(html, "<ul>")) {
-          return false;
-        }
-        inList = true;
-      }
-      if (!BufferAppend(html, "<li>")) {
-        return false;
-      }
-      if (!WriteInlineMarkdown(html, line + 2, lineLen - 2U, footnoteIds,
-                               footnoteText, footnoteCount, footnoteOrder,
-                               &nextFootnoteNumber)) {
-        return false;
-      }
-      if (!BufferAppend(html, "</li>")) {
-        return false;
-      }
-    } else {
-      if (inList) {
-        if (!BufferAppend(html, "</ul>")) {
-          return false;
-        }
-        inList = false;
-      }
-
-      size_t hashes = 0;
-      while (hashes < lineLen && line[hashes] == '#') {
-        hashes++;
-      }
-      if (hashes > 0U && hashes <= 6U && hashes < lineLen &&
-          line[hashes] == ' ') {
-        if (!BufferAppendFormat(html, "<h%zu>", hashes)) {
-          return false;
-        }
-        if (!WriteInlineMarkdown(html, line + hashes + 1U,
-                                 lineLen - hashes - 1U, footnoteIds,
-                                 footnoteText, footnoteCount, footnoteOrder,
-                                 &nextFootnoteNumber)) {
-          return false;
-        }
-        if (!BufferAppendFormat(html, "</h%zu>", hashes)) {
-          return false;
-        }
-      } else {
-        if (!BufferAppend(html, "<p>")) {
-          return false;
-        }
-        if (!WriteInlineMarkdown(html, line, lineLen, footnoteIds, footnoteText,
-                                 footnoteCount, footnoteOrder,
-                                 &nextFootnoteNumber)) {
-          return false;
-        }
-        if (!BufferAppend(html, "</p>")) {
-          return false;
-        }
-      }
-    }
-
-    if (lineEnd == len) {
-      break;
-    }
-    lineStart = lineEnd + 1U;
-  }
-
-  if (inList) {
-    if (!BufferAppend(html, "</ul>")) {
-      return false;
-    }
-  }
-  if (inCodeBlock) {
-    if (!BufferAppend(html, "</code></pre>")) {
-      return false;
-    }
-  }
-
-  bool anyFootnotes = false;
-  for (size_t i = 0; i < footnoteCount; i++) {
-    if (footnoteOrder[i] > 0) {
-      anyFootnotes = true;
-      break;
-    }
-  }
-  if (anyFootnotes) {
-    if (!BufferAppend(
-            html,
-            "<section class=\"panel footnotes\"><h2>Footnotes</h2><ol>")) {
-      return false;
-    }
-    for (size_t i = 0; i < footnoteCount; i++) {
-      if (footnoteOrder[i] == 0) {
-        continue;
-      }
-      if (!BufferAppendFormat(html,
-                              "<li id=\"fn-%s\"><span class=\"meta\">%d."
-                              "</span> ",
-                              footnoteIds[i], footnoteOrder[i])) {
-        return false;
-      }
-      if (!BufferAppendEscaped(html, footnoteText[i],
-                               std::strlen(footnoteText[i]))) {
-        return false;
-      }
-      if (!BufferAppend(html, "</li>")) {
-        return false;
-      }
-    }
-    if (!BufferAppend(html, "</ol></section>")) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-/**
- * Purpose: Identify image MIME from binary signatures (magic bytes).
- * Inputs: `data` pointer to file bytes and `len` byte count.
- * Outputs: Returns known image MIME string or null when unknown/invalid.
+/*
+ * Identify image MIME from binary signatures (magic bytes).
  */
 const char* DetectImageMimeFromData(const unsigned char* data, size_t len) {
   if (data == nullptr || len < 4U) {
@@ -3512,10 +844,8 @@ const char* DetectImageMimeFromData(const unsigned char* data, size_t len) {
   return nullptr;
 }
 
-/**
- * Purpose: Build the common HTML page shell with header/nav around content.
- * Inputs: page title, content HTML, output buffer.
- * Outputs: true on successful HTML construction; false on buffer overflow.
+/*
+ * Build the common HTML page shell with header/nav around content.
  */
 bool BuildPageLayout(const char* title, const char* content, TextBuffer* out) {
   if (!BufferAppend(out,
@@ -3556,10 +886,8 @@ bool BuildPageLayout(const char* title, const char* content, TextBuffer* out) {
   return true;
 }
 
-/**
- * Purpose: Populate stylesheet buffer with built-in Tufte-inspired theme CSS.
- * Inputs: `css` writable text buffer.
- * Outputs: No return value; appends default stylesheet content to `css`.
+/*
+ * Populate stylesheet buffer with built-in Tufte-inspired theme CSS.
  */
 void BuildDefaultCss(TextBuffer* css) {
   (void)BufferAppend(
@@ -3659,10 +987,8 @@ void BuildDefaultCss(TextBuffer* css) {
       "display:flex;flex-wrap:wrap;gap:8px;}nav a{margin-right:0;}}");
 }
 
-/**
- * Purpose: Render the "all pages" listing document.
- * Inputs: db handle, request arena, output page buffer, error buffer.
- * Outputs: true on success; false on query/render failures.
+/*
+ * Render the "all pages" listing document.
  */
 bool BuildPagesHtml(sqlite3* db,
                     RequestArena* arena,
@@ -3718,10 +1044,8 @@ bool BuildPagesHtml(sqlite3* db,
   return BuildPageLayout("All Pages", content.data, page);
 }
 
-/**
- * Purpose: Append markdown toolbar buttons for editor convenience actions.
- * Inputs: `content` writable HTML buffer for edit page composition.
- * Outputs: Returns true on successful append; false on buffer overflow.
+/*
+ * Append markdown toolbar buttons for editor convenience actions.
  */
 bool AppendEditorToolbarHtml(TextBuffer* content) {
   return BufferAppend(
@@ -3753,10 +1077,8 @@ bool AppendEditorToolbarHtml(TextBuffer* content) {
       "</div>");
 }
 
-/**
- * Purpose: Append strict client-side markdown toolbar behavior script.
- * Inputs: `content` writable HTML buffer for edit page composition.
- * Outputs: Returns true on successful append; false on buffer overflow.
+/*
+ * Append strict client-side markdown toolbar behavior script.
  */
 bool AppendEditorToolbarScript(TextBuffer* content) {
   return BufferAppend(
@@ -3830,12 +1152,8 @@ bool AppendEditorToolbarScript(TextBuffer* content) {
       "</script>");
 }
 
-/**
- * Purpose: Render the page editor form for create/update operations.
- * Inputs: db handle, request arena, slug, current title/markdown values,
- * output page buffer, and error buffer for DB-derived image section failures.
- * Outputs: true on success; false when rendered content exceeds limits or image
- * list query/rendering fails.
+/*
+ * Render the page editor form for create/update operations.
  */
 bool BuildEditHtml(sqlite3* db,
                    RequestArena* arena,
@@ -3950,10 +1268,8 @@ bool BuildEditHtml(sqlite3* db,
   return BuildPageLayout("Edit", content.data, page);
 }
 
-/**
- * Purpose: Render placeholder page for a missing slug with create link.
- * Inputs: request arena, missing slug, output page buffer.
- * Outputs: true on success; false on buffer overflow while composing HTML.
+/*
+ * Render placeholder page for a missing slug with create link.
  */
 bool BuildMissingPageHtml(RequestArena* arena,
                           const char* slug,
@@ -3990,11 +1306,8 @@ bool BuildMissingPageHtml(RequestArena* arena,
   return BuildPageLayout("Missing Page", content.data, page);
 }
 
-/**
- * Purpose: Render full page view including metadata, backlinks, and images.
- * Inputs: db handle, request arena, loaded page record, output page buffer,
- * error buffer.
- * Outputs: true on success; false on markdown/db/render failures.
+/*
+ * Render full page view including metadata, backlinks, and images.
  */
 bool BuildViewHtml(sqlite3* db,
                    RequestArena* arena,
@@ -4113,10 +1426,8 @@ bool BuildViewHtml(sqlite3* db,
   return BuildPageLayout(pageRecord->title, content.data, page);
 }
 
-/**
- * Purpose: Render the image upload form for a page slug.
- * Inputs: request arena, slug, output page buffer.
- * Outputs: true on success; false on buffer overflow.
+/*
+ * Render the image upload form for a page slug.
  */
 bool BuildImageUploadForm(RequestArena* arena,
                           const char* slug,
@@ -4163,11 +1474,8 @@ bool BuildImageUploadForm(RequestArena* arena,
   return BuildPageLayout("Upload Image", content.data, page);
 }
 
-/**
- * Purpose: Render upload-success page showing markdown embed syntax.
- * Inputs: request arena, page slug, original filename, image id, output page
- * buffer.
- * Outputs: true on success; false on buffer overflow while composing HTML.
+/*
+ * Render upload-success page showing markdown embed syntax.
  */
 bool BuildImageUploadedPage(RequestArena* arena,
                             const char* slug,
@@ -4207,20 +1515,16 @@ bool BuildImageUploadedPage(RequestArena* arena,
   return BuildPageLayout("Image Uploaded", content.data, page);
 }
 
-/**
- * Purpose: Build final stylesheet content.
- * Inputs: `css` writable output buffer.
- * Outputs: No return value; writes built-in stylesheet into `css`.
+/*
+ * Build final stylesheet content.
  */
 void BuildStyleCss(TextBuffer* css) {
   BufferReset(css);
   BuildDefaultCss(css);
 }
 
-/**
- * Purpose: Execute routing and produce an HTTP response for one request.
- * Inputs: db handle, request arena, parsed request, response output pointer.
- * Outputs: No return value; response is populated with status/body/headers.
+/*
+ * Execute routing and produce an HTTP response for one request.
  */
 void HandleRequest(sqlite3* db,
                    RequestArena* arena,
@@ -4621,11 +1925,8 @@ void HandleRequest(sqlite3* db,
   SetError(response, 404, "Not found");
 }
 
-/**
- * Purpose: Serialize and send HTTP response headers/body to client socket.
- * Inputs: `clientFd` connected socket; `response` fully populated output
- * object. Outputs: Returns true when full header and body are sent; false on
- * socket error.
+/*
+ * Serialize and send HTTP response headers/body to client socket.
  */
 bool SendResponse(int clientFd, const HttpResponse* response) {
   TextBuffer header;
@@ -4686,10 +1987,8 @@ bool SendResponse(int clientFd, const HttpResponse* response) {
   return true;
 }
 
-/**
- * Purpose: Print CLI usage/help text to stdout.
- * Inputs: No function arguments.
- * Outputs: No return value; writes usage lines to standard output.
+/*
+ * Print CLI usage/help text to stdout.
  */
 void PrintUsage() {
   std::printf("mswiki options:\n");
@@ -4704,10 +2003,8 @@ void PrintUsage() {
   std::printf("  --help                     Show this help\n");
 }
 
-/**
- * Purpose: Parse command-line arguments into runtime Config.
- * Inputs: `argc/argv` process arguments and writable `config`.
- * Outputs: Returns parse status enum (ok/help/error) and mutates `config`.
+/*
+ * Parse command-line arguments into runtime Config.
  */
 ArgParseResult ParseArgs(int argc, char** argv, Config* config) {
   (void)CopyString(config->listenHost, sizeof(config->listenHost), "0.0.0.0");
@@ -4781,12 +2078,12 @@ ArgParseResult ParseArgs(int argc, char** argv, Config* config) {
   return ARG_PARSE_OK;
 }
 
+#include "sections/selftest.inc"
+
 }  // namespace
 
-/**
- * Purpose: Program entrypoint that configures, runs, and shuts down the server.
- * Inputs: Standard C `argc/argv` process arguments.
- * Outputs: Returns process exit code (0 success, non-zero failure).
+/*
+ * Program entrypoint that configures, runs, and shuts down the server.
  */
 int main(int argc, char** argv) {
   Config config;

@@ -58,4 +58,4 @@ if (MSWIKI_FUZZING)
 endif()
 
 enable_testing()
-add_test(NAME mswiki_self_test COMMAND mswiki --self-test)
+add_test(NAME mswiki_self_test COMMAND $<TARGET_FILE:mswiki> --self-test)
