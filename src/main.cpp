@@ -116,6 +116,7 @@ bool DbUpsertPage(sqlite3* db,
                   const char* markdown,
                   char* err,
                   size_t errSize);
+bool DbDeletePage(sqlite3* db, const char* slug, char* err, size_t errSize);
 void ExtractWikiLinks(const char* markdown,
                       char links[][MAX_SLUG],
                       size_t* linkCount,
@@ -166,6 +167,10 @@ bool ReadRequestFromSocket(int clientFd,
                            unsigned char* out,
                            size_t* outLen,
                            bool* tooLarge);
+const unsigned char* FindBytes(const unsigned char* haystack,
+                               size_t haystackLen,
+                               const unsigned char* needle,
+                               size_t needleLen);
 const char* DetectImageMimeFromData(const unsigned char* data, size_t len);
 void HandleRequest(sqlite3* db,
                    const Config* config,
@@ -945,6 +950,32 @@ void SelfTestDatabase(SelfTestState* state) {
     (void)sqlite3_finalize(imageStmt);
   }
 
+  const bool insertImageAgainOk =
+      DbInsertImage(db, "home", "tiny.gif", "image/gif", IMAGE_DATA,
+                    sizeof(IMAGE_DATA), &imageId, err, sizeof(err));
+  SelfTestExpect(state, insertImageAgainOk, "DbInsertImage second call");
+
+  const bool deletePageOk = DbDeletePage(db, "home", err, sizeof(err));
+  SelfTestExpect(state, deletePageOk, "DbDeletePage call");
+
+  found = true;
+  const bool getDeletedPageOk =
+      DbGetPage(db, "home", &page, &found, err, sizeof(err));
+  SelfTestExpect(state, getDeletedPageOk, "DbGetPage after delete call");
+  SelfTestExpect(state, !found, "DbDeletePage removed page row");
+
+  imageStmt = nullptr;
+  found = true;
+  const bool getImageAfterPageDeleteOk =
+      DbGetImage(db, imageId, mime, sizeof(mime), &blobData, &blobLen,
+                 &imageStmt, &found, err, sizeof(err));
+  SelfTestExpect(state, getImageAfterPageDeleteOk,
+                 "DbGetImage after page delete");
+  SelfTestExpect(state, !found, "DbDeletePage removed page images");
+  if (imageStmt != nullptr) {
+    (void)sqlite3_finalize(imageStmt);
+  }
+
   (void)sqlite3_close(db);
   (void)unlink(dbPath);
 }
@@ -992,6 +1023,58 @@ void SelfTestHttpHandler(SelfTestState* state) {
                  std::strstr(reinterpret_cast<const char*>(response.body),
                              "All Pages") != nullptr,
                  "Pages response content");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/edit/home");
+  HandleRequest(db, &config, &request, &response);
+  SelfTestExpect(state, response.status == 200, "HandleRequest GET /edit/home");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "id=\"markdown-toolbar\"") != nullptr,
+                 "Edit page renders markdown toolbar");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "data-md-action=\"bold\"") != nullptr,
+                 "Edit page includes toolbar action buttons");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "Images for this page") != nullptr,
+                 "Edit page includes image list section");
+
+  const bool createHomeForDelete =
+      DbUpsertPage(db, "home", "Home", "Body", err, sizeof(err));
+  SelfTestExpect(state, createHomeForDelete, "DbUpsertPage for delete route");
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/page/home");
+  HandleRequest(db, &config, &request, &response);
+  static const unsigned char DELETE_PAGE_TEXT[] = "Delete page";
+  static const unsigned char DELETE_IMAGE_ROUTE[] = "/images/delete/";
+  SelfTestExpect(state,
+                 FindBytes(response.body, response.bodyLen, DELETE_PAGE_TEXT,
+                           sizeof(DELETE_PAGE_TEXT) - 1U) == nullptr,
+                 "View page does not render delete page button");
+  SelfTestExpect(state,
+                 FindBytes(response.body, response.bodyLen, DELETE_IMAGE_ROUTE,
+                           sizeof(DELETE_IMAGE_ROUTE) - 1U) == nullptr,
+                 "View page does not render delete image actions");
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "POST");
+  (void)CopyString(request.path, sizeof(request.path), "/delete/home");
+  HandleRequest(db, &config, &request, &response);
+  SelfTestExpect(state, response.status == 302,
+                 "HandleRequest POST /delete/home");
+  SelfTestExpect(state, std::strcmp(response.location, "/pages") == 0,
+                 "Delete page redirects to /pages");
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/page/home");
+  HandleRequest(db, &config, &request, &response);
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "Create this page") != nullptr,
+                 "Deleted page behaves as missing");
 
   HttpRequest parsedRequest;
   (void)std::memset(&parsedRequest, 0, sizeof(parsedRequest));
@@ -1712,6 +1795,67 @@ bool DbUpsertPage(sqlite3* db,
 }
 
 /**
+ * Purpose: Delete a page and all direct page-owned data by slug.
+ * Inputs: db handle, slug key, and error output buffer.
+ * Outputs: true when delete transaction commits; false on DB failures.
+ */
+bool DbDeletePage(sqlite3* db, const char* slug, char* err, size_t errSize) {
+  char* sqliteErr = nullptr;
+  if (sqlite3_exec(db, "BEGIN IMMEDIATE TRANSACTION;", nullptr, nullptr,
+                   &sqliteErr) != SQLITE_OK) {
+    (void)std::snprintf(
+        err, errSize, "%s",
+        sqliteErr == nullptr ? "begin transaction failed" : sqliteErr);
+    if (sqliteErr != nullptr) {
+      sqlite3_free(sqliteErr);
+    }
+    return false;
+  }
+
+  struct DeleteStep {
+    const char* sql;
+    int bindCount;
+  };
+  static const DeleteStep STEPS[] = {
+      {"DELETE FROM page_links WHERE from_slug = ?", 1},
+      {"DELETE FROM page_links WHERE to_slug = ?", 1},
+      {"DELETE FROM images WHERE page_slug = ?", 1},
+      {"DELETE FROM pages WHERE slug = ?", 1},
+  };
+
+  for (size_t i = 0; i < sizeof(STEPS) / sizeof(STEPS[0]); i++) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, STEPS[i].sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
+      (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+      return false;
+    }
+    if (STEPS[i].bindCount == 1) {
+      (void)sqlite3_bind_text(stmt, 1, slug, -1, SQLITE_TRANSIENT);
+    }
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+      (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
+      (void)sqlite3_finalize(stmt);
+      (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+      return false;
+    }
+    (void)sqlite3_finalize(stmt);
+  }
+
+  if (sqlite3_exec(db, "COMMIT;", nullptr, nullptr, &sqliteErr) != SQLITE_OK) {
+    (void)std::snprintf(err, errSize, "%s",
+                        sqliteErr == nullptr ? "commit failed" : sqliteErr);
+    if (sqliteErr != nullptr) {
+      sqlite3_free(sqliteErr);
+    }
+    (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    return false;
+  }
+
+  return true;
+}
+
+/**
  * Purpose: Query all pages and append HTML list items for index rendering.
  * Inputs: `db` read handle; `html` writable buffer; `err/errSize` error buffer.
  * Outputs: Returns true on success; false on DB/buffer errors with message in
@@ -1869,12 +2013,14 @@ bool DbAppendBacklinksHtml(sqlite3* db,
 
 /**
  * Purpose: Append page-image list HTML including markdown snippets/actions.
- * Inputs: db handle, page slug, html output buffer, error buffer.
+ * Inputs: db handle, page slug, html output buffer, insert-button toggle,
+ * error buffer.
  * Outputs: true on success; false on DB/query or buffer append failures.
  */
 bool DbAppendImagesHtml(sqlite3* db,
                         const char* slug,
                         TextBuffer* html,
+                        bool includeInsertButtons,
                         char* err,
                         size_t errSize) {
   sqlite3_stmt* stmt = nullptr;
@@ -1926,21 +2072,62 @@ bool DbAppendImagesHtml(sqlite3* db,
       (void)sqlite3_finalize(stmt);
       return false;
     }
-    if (!BufferAppendFormat(html,
-                            "</a> (<code>![](/image/%d)</code>) "
-                            "<form class=\"inline-delete\" method=\"post\" "
-                            "action=\"/images/delete/%d/",
-                            id, id)) {
+    char snippet[512];
+    if (std::snprintf(snippet, sizeof(snippet), "![%s](/image/%d)", filename,
+                      id) < 0) {
       (void)sqlite3_finalize(stmt);
       return false;
     }
-    if (!BufferAppend(html, encodedSlug)) {
+
+    if (!BufferAppend(html, "</a> (<code>")) {
       (void)sqlite3_finalize(stmt);
       return false;
     }
-    if (!BufferAppend(html,
-                      "\"><button type=\"submit\" "
-                      "class=\"delete-button\">Delete</button></form></li>")) {
+    if (!BufferAppendEscaped(html, snippet, std::strlen(snippet))) {
+      (void)sqlite3_finalize(stmt);
+      return false;
+    }
+    if (!BufferAppend(html, "</code>) ")) {
+      (void)sqlite3_finalize(stmt);
+      return false;
+    }
+    if (includeInsertButtons) {
+      if (!BufferAppend(html,
+                        "<button type=\"button\" class=\"md-insert-image\" "
+                        "data-md-snippet=\"")) {
+        (void)sqlite3_finalize(stmt);
+        return false;
+      }
+      if (!BufferAppendEscaped(html, snippet, std::strlen(snippet))) {
+        (void)sqlite3_finalize(stmt);
+        return false;
+      }
+      if (!BufferAppend(html, "\">Insert</button> ")) {
+        (void)sqlite3_finalize(stmt);
+        return false;
+      }
+      if (!BufferAppendFormat(
+              html,
+              "<form class=\"inline-delete\" method=\"post\" "
+              "onsubmit=\"return confirm('Delete this image?');\" "
+              "action=\"/images/delete/%d/",
+              id)) {
+        (void)sqlite3_finalize(stmt);
+        return false;
+      }
+      if (!BufferAppend(html, encodedSlug)) {
+        (void)sqlite3_finalize(stmt);
+        return false;
+      }
+      if (!BufferAppend(html,
+                        "\"><button type=\"submit\" "
+                        "class=\"md-insert-image delete-button\">"
+                        "Delete image</button></form>")) {
+        (void)sqlite3_finalize(stmt);
+        return false;
+      }
+    }
+    if (!BufferAppend(html, "</li>")) {
       (void)sqlite3_finalize(stmt);
       return false;
     }
@@ -3004,7 +3191,6 @@ bool BuildPageLayout(const Config* config,
                     "<strong>mswiki</strong></a><nav>"
                     "<a href=\"/page/home\">Home</a>"
                     "<a href=\"/pages\">All Pages</a>"
-                    "<a href=\"/edit/home\">Edit Home</a>"
                     "</nav></div></header><main>")) {
     return false;
   }
@@ -3059,9 +3245,34 @@ void BuildDefaultCss(TextBuffer* css) {
       "button{border:0;border-radius:8px;background:var(--accent);color:#fff;"
       "padding:10px 14px;font:inherit;cursor:pointer;}"
       "button:hover{background:var(--accent-hover);}"
-      ".delete-button{background:#8a2f2f;padding:6px 10px;font-size:.85rem;}"
-      ".delete-button:hover{background:#6f2525;}"
-      ".inline-delete{display:inline-block;margin-left:10px;}"
+      ".form-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center;"
+      "margin:10px 0;}"
+      ".action-button,.button-link{display:inline-flex;align-items:center;"
+      "justify-content:center;min-height:36px;padding:0 14px;border-radius:8px;"
+      "border:1px solid transparent;font:inherit;line-height:1.1;"
+      "text-decoration:none;}"
+      ".action-button{background:var(--accent);color:#fff;cursor:pointer;}"
+      ".action-button:hover{background:var(--accent-hover);}"
+      ".button-secondary{background:#fff;color:var(--text);border-color:var("
+      "--line);}"
+      ".button-secondary:hover{color:var(--accent);border-color:var(--accent);}"
+      ".editor-toolbar{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 10px;}"
+      ".md-tool{display:inline-flex;align-items:center;justify-content:center;"
+      "min-width:92px;height:34px;padding:0 10px;border:1px solid var(--line);"
+      "border-radius:6px;background:#fff;color:var(--text);font-family:\"SF "
+      "Mono\",Menlo,Consolas,monospace;font-size:.8rem;line-height:1;"
+      "font-weight:600;white-space:nowrap;}"
+      ".md-tool:hover{background:#fff;color:var(--accent);border-color:var("
+      "--accent);}"
+      ".md-tool:focus{outline:2px solid var(--accent);outline-offset:1px;}"
+      ".md-insert-image{margin-left:8px;border:1px solid var(--line);"
+      "border-radius:6px;background:#fff;color:var(--text);padding:5px 10px;"
+      "font-size:.8rem;line-height:1.2;}"
+      ".md-insert-image:hover{background:#fff;color:var(--accent);border-color:"
+      "var(--accent);}"
+      ".delete-button{background:#8a2f2f;border-color:#8a2f2f;color:#fff;}"
+      ".delete-button:hover{background:#6f2525;border-color:#6f2525;}"
+      ".inline-delete{display:inline-block;margin:0;}"
       ".meta{color:var(--muted);font-size:.9rem;}"
       ".notice{padding:10px 12px;border-left:4px solid "
       "var(--accent);background:#eef7fb;}"
@@ -3110,8 +3321,10 @@ bool BuildPagesHtml(sqlite3* db,
   BufferReset(&content);
 
   if (!BufferAppend(&content,
-                    "<article><h1>All Pages</h1><p><a "
-                    "href=\"/edit/new-page\">Create a page</a></p>")) {
+                    "<article><h1>All Pages</h1>"
+                    "<p class=\"meta\">To create a page, edit the URL to "
+                    "<code>/edit/your-page-slug</code> (for example "
+                    "<code>/edit/project-notes</code>), then save.</p>")) {
     return false;
   }
 
@@ -3148,15 +3361,132 @@ bool BuildPagesHtml(sqlite3* db,
 }
 
 /**
+ * Purpose: Append markdown toolbar buttons for editor convenience actions.
+ * Inputs: `content` writable HTML buffer for edit page composition.
+ * Outputs: Returns true on successful append; false on buffer overflow.
+ */
+bool AppendEditorToolbarHtml(TextBuffer* content) {
+  return BufferAppend(
+      content,
+      "<div id=\"markdown-toolbar\" class=\"editor-toolbar\" role=\"toolbar\" "
+      "aria-label=\"Markdown formatting\">"
+      "<button type=\"button\" class=\"md-tool\" data-md-action=\"h1\" "
+      "aria-label=\"Heading 1\">H1 Heading</button>"
+      "<button type=\"button\" class=\"md-tool\" data-md-action=\"h2\" "
+      "aria-label=\"Heading 2\">H2 Heading</button>"
+      "<button type=\"button\" class=\"md-tool\" data-md-action=\"bold\" "
+      "aria-label=\"Bold\">Bold</button>"
+      "<button type=\"button\" class=\"md-tool\" data-md-action=\"italic\" "
+      "aria-label=\"Italic\">Italic</button>"
+      "<button type=\"button\" class=\"md-tool\" data-md-action=\"link\" "
+      "aria-label=\"Link\">Link</button>"
+      "<button type=\"button\" class=\"md-tool\" data-md-action=\"wiki\" "
+      "aria-label=\"Wiki Link\">[[Wiki]]</button>"
+      "<button type=\"button\" class=\"md-tool\" data-md-action=\"code\" "
+      "aria-label=\"Inline Code\">&lt;/&gt; Code</button>"
+      "<button type=\"button\" class=\"md-tool\" data-md-action=\"quote\" "
+      "aria-label=\"Quote\">&gt; Quote</button>"
+      "<button type=\"button\" class=\"md-tool\" data-md-action=\"list\" "
+      "aria-label=\"List\">List</button>"
+      "<button type=\"button\" class=\"md-tool\" data-md-action=\"footnote\" "
+      "aria-label=\"Footnote\">Footnote</button>"
+      "<button type=\"button\" class=\"md-tool\" data-md-action=\"image\" "
+      "aria-label=\"Image\">Image</button>"
+      "</div>");
+}
+
+/**
+ * Purpose: Append strict client-side markdown toolbar behavior script.
+ * Inputs: `content` writable HTML buffer for edit page composition.
+ * Outputs: Returns true on successful append; false on buffer overflow.
+ */
+bool AppendEditorToolbarScript(TextBuffer* content) {
+  return BufferAppend(
+      content,
+      "<script>(function(){'use strict';"
+      "function clamp(value,min,max){if(value<min){return min;}if(value>max){"
+      "return max;}return value;}"
+      "function findActionNode(node,root){while(node&&node!==root){if("
+      "node.nodeType===1&&node.getAttribute('data-md-action')){return node;}"
+      "node=node.parentNode;}return null;}"
+      "function prefixLines(text,prefix){if(text.length===0){return prefix;}"
+      "var parts=text.split('\\\\n');for(var i=0;i<parts.length;i++){parts[i]="
+      "prefix+parts[i];}return parts.join('\\\\n');}"
+      "var editor=document.getElementById('markdown');"
+      "var toolbar=document.getElementById('markdown-toolbar');"
+      "if(!editor||!toolbar){return;}"
+      "if(typeof editor.selectionStart!=='number'||typeof "
+      "editor.selectionEnd!=='number'){return;}"
+      "var actions={"
+      "h1:{mode:'line-prefix',prefix:'# ',placeholder:'Heading'},"
+      "h2:{mode:'line-prefix',prefix:'## ',placeholder:'Heading'},"
+      "bold:{mode:'wrap',prefix:'**',suffix:'**',placeholder:'bold text'},"
+      "italic:{mode:'wrap',prefix:'*',suffix:'*',placeholder:'italic text'},"
+      "link:{mode:'wrap',prefix:'[',suffix:'](https://example.com)',"
+      "placeholder:'link text'},"
+      "wiki:{mode:'wrap',prefix:'[[',suffix:']]',placeholder:'Target Page'},"
+      "code:{mode:'wrap',prefix:'`',suffix:'`',placeholder:'code'},"
+      "quote:{mode:'line-prefix',prefix:'> ',placeholder:'quoted text'},"
+      "list:{mode:'line-prefix',prefix:'- ',placeholder:'list item'},"
+      "footnote:{mode:'insert',insertText:'[^note]\\\\n\\\\n[^note]: note "
+      "text'},"
+      "image:{mode:'insert',insertText:'![alt text](/image/1)'}};"
+      "function applyReplacement(start,end,replacement,cursorPos){"
+      "if(typeof editor.setRangeText==='function'){editor.setRangeText("
+      "replacement,start,end,'end');}else{var before=editor.value.slice(0,"
+      "start);var after=editor.value.slice(end);editor.value=before+"
+      "replacement+after;editor.selectionStart=start+replacement.length;"
+      "editor.selectionEnd=editor.selectionStart;}"
+      "if(typeof cursorPos==='number'){var bounded=clamp(cursorPos,0,"
+      "editor.value.length);editor.selectionStart=bounded;editor.selectionEnd="
+      "bounded;}editor.focus();}"
+      "toolbar.addEventListener('click',function(event){var button="
+      "findActionNode(event.target,toolbar);if(!button){return;}"
+      "event.preventDefault();var actionName=button.getAttribute("
+      "'data-md-action');if(!Object.prototype.hasOwnProperty.call(actions,"
+      "actionName)){return;}var action=actions[actionName];var start=clamp("
+      "editor.selectionStart,0,editor.value.length);var end=clamp("
+      "editor.selectionEnd,0,editor.value.length);if(end<start){var tmp=start;"
+      "start=end;end=tmp;}var selected=editor.value.slice(start,end);"
+      "if(action.mode==='wrap'){var middle=(selected.length>0)?selected:"
+      "action.placeholder;var replacement=action.prefix+middle+action.suffix;"
+      "var cursor=(selected.length>0)?(start+replacement.length):(start+"
+      "action.prefix.length+middle.length);applyReplacement(start,end,"
+      "replacement,cursor);return;}"
+      "if(action.mode==='line-prefix'){var replacementText=(selected.length>0)?"
+      "prefixLines(selected,action.prefix):(action.prefix+action.placeholder);"
+      "applyReplacement(start,end,replacementText,start+replacementText.length)"
+      ";"
+      "return;}"
+      "if(action.mode==='insert'){applyReplacement(start,end,action.insertText,"
+      "start+action.insertText.length);}});"
+      "document.addEventListener('click',function(event){var target="
+      "event.target;while(target&&target!==document){if(target.nodeType===1&&"
+      "target.classList&&target.classList.contains('md-insert-image')){"
+      "event.preventDefault();var snippet=target.getAttribute("
+      "'data-md-snippet');if(typeof snippet!=='string'||snippet.length===0){"
+      "return;}var start=clamp(editor.selectionStart,0,editor.value.length);"
+      "var end=clamp(editor.selectionEnd,0,editor.value.length);if(end<start){"
+      "var tmp=start;start=end;end=tmp;}applyReplacement(start,end,snippet,"
+      "start+snippet.length);return;}target=target.parentNode;}});})();"
+      "</script>");
+}
+
+/**
  * Purpose: Render the page editor form for create/update operations.
- * Inputs: config, slug, current title/markdown values, output page buffer.
- * Outputs: true on success; false when rendered content exceeds buffer limits.
+ * Inputs: config/db handles, slug, current title/markdown values, output page
+ * buffer, and error buffer for DB-derived image section failures.
+ * Outputs: true on success; false when rendered content exceeds limits or image
+ * list query/rendering fails.
  */
 bool BuildEditHtml(const Config* config,
+                   sqlite3* db,
                    const char* slug,
                    const char* title,
                    const char* markdown,
-                   TextBuffer* page) {
+                   TextBuffer* page,
+                   char* err,
+                   size_t errSize) {
   TextBuffer content;
   BufferReset(&content);
 
@@ -3188,26 +3518,70 @@ bool BuildEditHtml(const Config* config,
   }
   if (!BufferAppend(
           &content,
-          "\" required><br><br><label for=\"markdown\">Markdown</label><br>"
-          "<textarea id=\"markdown\" name=\"markdown\" required>")) {
+          "\" required><br><br><label for=\"markdown\">Markdown</label><br>")) {
+    return false;
+  }
+  if (!AppendEditorToolbarHtml(&content)) {
+    return false;
+  }
+  if (!BufferAppend(&content,
+                    "<textarea id=\"markdown\" name=\"markdown\" required>")) {
     return false;
   }
   if (!BufferAppendEscaped(&content, markdown, std::strlen(markdown))) {
     return false;
   }
+  if (!BufferAppend(&content, "</textarea>")) {
+    return false;
+  }
   if (!BufferAppend(
           &content,
-          "</textarea><br><p class=\"meta\">Wiki links: "
+          "<br><p class=\"meta\">Wiki links: "
           "<code>[[Target Page]]</code> or <code>[[target|label]]</code>.</p>"
           "<p class=\"meta\">Footnotes: <code>[^id]</code> in text and "
           "<code>[^id]: note</code> definitions.</p>"
-          "<button type=\"submit\">Save</button> <a href=\"/page/")) {
+          "<div class=\"form-actions\">"
+          "<button type=\"submit\" class=\"action-button\">Save</button>"
+          "<a class=\"button-link button-secondary\" href=\"/page/")) {
     return false;
   }
   if (!BufferAppend(&content, encodedSlug)) {
     return false;
   }
-  if (!BufferAppend(&content, "\">Cancel</a></form></article>")) {
+  if (!BufferAppend(&content,
+                    "\">Cancel</a></div></form> "
+                    "<form class=\"inline-delete\" method=\"post\" "
+                    "onsubmit=\"return confirm('Delete this page and all "
+                    "related images and links?');\" "
+                    "action=\"/delete/")) {
+    return false;
+  }
+  if (!BufferAppend(&content, encodedSlug)) {
+    return false;
+  }
+  if (!BufferAppend(&content,
+                    "\"><div class=\"form-actions\"><button type=\"submit\" "
+                    "class=\"action-button delete-button\">Delete page</button>"
+                    "</div></form><section class=\"panel\">"
+                    "<h2>Images for this page</h2><p><a href=\"/images/new/")) {
+    return false;
+  }
+  if (!BufferAppend(&content, encodedSlug)) {
+    return false;
+  }
+  if (!BufferAppend(&content, "\">Upload image</a></p>")) {
+    return false;
+  }
+  if (!DbAppendImagesHtml(db, slug, &content, true, err, errSize)) {
+    return false;
+  }
+  if (!BufferAppend(&content, "</section>")) {
+    return false;
+  }
+  if (!AppendEditorToolbarScript(&content)) {
+    return false;
+  }
+  if (!BufferAppend(&content, "</article>")) {
     return false;
   }
 
@@ -3342,7 +3716,8 @@ bool BuildViewHtml(sqlite3* db,
     return false;
   }
   if (!BufferAppend(&content,
-                    "\">Upload image</a></p>"
+                    "\">Upload image</a> "
+                    "</p>"
                     "<section class=\"panel\"><h2>Backlinks</h2>")) {
     return false;
   }
@@ -3356,7 +3731,8 @@ bool BuildViewHtml(sqlite3* db,
     return false;
   }
 
-  if (!DbAppendImagesHtml(db, pageRecord->slug, &content, err, errSize)) {
+  if (!DbAppendImagesHtml(db, pageRecord->slug, &content, false, err,
+                          errSize)) {
     return false;
   }
 
@@ -3656,8 +4032,8 @@ void HandleRequest(sqlite3* db,
 
     TextBuffer html;
     if (found) {
-      if (!BuildEditHtml(config, slug, pageRecord.title, pageRecord.markdown,
-                         &html)) {
+      if (!BuildEditHtml(config, db, slug, pageRecord.title,
+                         pageRecord.markdown, &html, err, sizeof(err))) {
         SetError(response, 500, "Failed to build edit page");
         return;
       }
@@ -3665,7 +4041,8 @@ void HandleRequest(sqlite3* db,
       char defaultMarkdown[1024];
       (void)std::snprintf(defaultMarkdown, sizeof(defaultMarkdown), "# %s\n",
                           slug);
-      if (!BuildEditHtml(config, slug, slug, defaultMarkdown, &html)) {
+      if (!BuildEditHtml(config, db, slug, slug, defaultMarkdown, &html, err,
+                         sizeof(err))) {
         SetError(response, 500, "Failed to build edit page");
         return;
       }
@@ -3723,6 +4100,26 @@ void HandleRequest(sqlite3* db,
     }
     (void)std::snprintf(location, sizeof(location), "/page/%s", encodedSlug);
     SetRedirect(response, location);
+    return;
+  }
+
+  if (std::strcmp(request->method, "POST") == 0 &&
+      std::strncmp(request->path, "/delete/", 8) == 0) {
+    char decoded[MAX_PATH];
+    (void)UrlDecode(decoded, sizeof(decoded), request->path + 8,
+                    std::strlen(request->path + 8));
+    char slug[MAX_SLUG];
+    if (!Slugify(decoded, slug, sizeof(slug)) || !IsSafeSlug(slug)) {
+      SetError(response, 400, "Invalid page slug");
+      return;
+    }
+
+    char err[256];
+    if (!DbDeletePage(db, slug, err, sizeof(err))) {
+      SetError(response, 500, err);
+      return;
+    }
+    SetRedirect(response, "/pages");
     return;
   }
 
