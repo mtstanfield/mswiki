@@ -336,6 +336,38 @@ int HexDigitValue(int ch) {
 }
 
 /**
+ * Purpose: Validate HTTP header-name token character per RFC tchar set.
+ * Inputs: `ch` ASCII character code.
+ * Outputs: Returns true when `ch` is allowed in header field-name.
+ */
+bool IsHeaderTokenChar(int ch) {
+  if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+      (ch >= '0' && ch <= '9')) {
+    return true;
+  }
+  switch (ch) {
+    case '!':
+    case '#':
+    case '$':
+    case '%':
+    case '&':
+    case '\'':
+    case '*':
+    case '+':
+    case '-':
+    case '.':
+    case '^':
+    case '_':
+    case '`':
+    case '|':
+    case '~':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
  * Purpose: Parse a base-10 unsigned integer with strict full-string validation.
  * Inputs: `text` digits-only C string; `out` writable result pointer.
  * Outputs: Returns true and writes parsed value on success; false on empty,
@@ -453,8 +485,19 @@ size_t UrlDecode(char* out, size_t outSize, const char* in, size_t inLen) {
         IsHexDigitAscii(in[i + 2U])) {
       const int hi = HexDigitValue(in[i + 1U]);
       const int lo = HexDigitValue(in[i + 2U]);
-      out[outLen++] = static_cast<char>((hi << 4) | lo);
-      i += 2U;
+      const unsigned int decoded = static_cast<unsigned int>((hi << 4) | lo);
+      if (decoded == 0U) {
+        if (outLen + 3U >= outSize) {
+          break;
+        }
+        out[outLen++] = '%';
+        out[outLen++] = in[i + 1U];
+        out[outLen++] = in[i + 2U];
+        i += 2U;
+      } else {
+        out[outLen++] = static_cast<char>(decoded);
+        i += 2U;
+      }
     } else if (in[i] == '+') {
       out[outLen++] = ' ';
     } else {
@@ -762,6 +805,9 @@ void SelfTestSlugAndCodec(SelfTestState* state) {
   (void)UrlDecode(decoded, sizeof(decoded), "bad%GGvalue", 11U);
   SelfTestExpect(state, std::strcmp(decoded, "bad%GGvalue") == 0,
                  "UrlDecode leaves malformed escapes literal");
+  (void)UrlDecode(decoded, sizeof(decoded), "bad%00value", 11U);
+  SelfTestExpect(state, std::strcmp(decoded, "bad%00value") == 0,
+                 "UrlDecode leaves encoded NUL literal");
 
   int parsedPositive = 0;
   SelfTestExpect(state, ParsePositiveIntStrict("42", &parsedPositive),
@@ -848,7 +894,7 @@ void SelfTestFormAndMultipart(SelfTestState* state) {
   (void)CopyString(request.headers[0].key, sizeof(request.headers[0].key),
                    "content-type");
   (void)CopyString(request.headers[0].value, sizeof(request.headers[0].value),
-                   "multipart/form-data; boundary=abc123");
+                   "multipart/form-data; boundary=abc123; charset=utf-8");
   static const char MULTIPART_BODY[] =
       "--abc123\r\n"
       "Content-Disposition: form-data; name=\"image\"; filename=\"p.png\"\r\n"
@@ -1102,6 +1148,13 @@ void SelfTestHttpHandler(SelfTestState* state) {
                  !ParseHttpRequest(rawBadHeader, sizeof(rawBadHeader) - 1U,
                                    &parsedRequest, &bodyStart, &bodyOffset),
                  "ParseHttpRequest rejects malformed header line");
+  unsigned char rawBadHeaderName[] =
+      "GET / HTTP/1.1\r\nHost: wiki.local\r\nBad Header: x\r\n\r\n";
+  SelfTestExpect(
+      state,
+      !ParseHttpRequest(rawBadHeaderName, sizeof(rawBadHeaderName) - 1U,
+                        &parsedRequest, &bodyStart, &bodyOffset),
+      "ParseHttpRequest rejects invalid header-name token");
   SelfTestExpect(state,
                  !ParseRequestLine("GET noslash HTTP/1.1", &parsedRequest),
                  "ParseRequestLine rejects non-origin-form target");
@@ -1358,6 +1411,11 @@ bool ParseHttpRequest(unsigned char* raw,
     char* colon = std::strchr(cursor, ':');
     if (colon == nullptr || colon == cursor) {
       return false;
+    }
+    for (const char* it = cursor; it < colon; ++it) {
+      if (!IsHeaderTokenChar(static_cast<unsigned char>(*it))) {
+        return false;
+      }
     }
     *colon = '\0';
     if (request->headerCount >= MAX_HEADERS) {
@@ -2325,19 +2383,34 @@ void ParseMultipartImage(const HttpRequest* request, MultipartImage* image) {
     return;
   }
   boundaryPos += 9;
-
-  char boundary[128];
-  if (!CopyString(boundary, sizeof(boundary), boundaryPos)) {
-    return;
+  while (*boundaryPos == ' ' || *boundaryPos == '\t') {
+    boundaryPos++;
   }
-  TrimInPlace(boundary);
-  if (boundary[0] == '"') {
-    const size_t len = std::strlen(boundary);
-    if (len > 1U && boundary[len - 1U] == '"') {
-      (void)std::memmove(boundary, boundary + 1, len - 2U);
-      boundary[len - 2U] = '\0';
+
+  const char* boundaryEnd = boundaryPos;
+  if (*boundaryPos == '"') {
+    boundaryPos++;
+    boundaryEnd = boundaryPos;
+    while (*boundaryEnd != '\0' && *boundaryEnd != '"') {
+      boundaryEnd++;
+    }
+    if (*boundaryEnd != '"') {
+      return;
+    }
+  } else {
+    while (*boundaryEnd != '\0' && *boundaryEnd != ';' && *boundaryEnd != ' ' &&
+           *boundaryEnd != '\t') {
+      boundaryEnd++;
     }
   }
+
+  char boundary[128];
+  const size_t boundaryLen = static_cast<size_t>(boundaryEnd - boundaryPos);
+  if (boundaryLen == 0U || boundaryLen + 1U > sizeof(boundary)) {
+    return;
+  }
+  (void)std::memcpy(boundary, boundaryPos, boundaryLen);
+  boundary[boundaryLen] = '\0';
 
   char delimiter[160];
   if (std::snprintf(delimiter, sizeof(delimiter), "--%s", boundary) < 0) {
