@@ -978,6 +978,33 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
                  std::strcmp(DetectImageMimeFromData(PNG_SIG, sizeof(PNG_SIG)),
                              "image/png") == 0,
                  "DetectImageMimeFromData png");
+
+  TextBuffer securityHtml;
+  if (!ArenaAllocTextBuffer(&arena, &securityHtml, MAX_RESPONSE_BYTES)) {
+    SelfTestExpect(state, false, "RenderMarkdownToHtml security arena alloc");
+    return;
+  }
+  const bool renderedSecurity = RenderMarkdownToHtml(
+      "[link](javascript:alert(1))\n"
+      "![img](javascript:alert(1))\n"
+      "[safe](https://example.com/a_(b))\n"
+      "[^bad\"id]: note\n"
+      "ref[^bad\"id]\n",
+      &securityHtml);
+  SelfTestExpect(state, renderedSecurity,
+                 "RenderMarkdownToHtml security cases");
+  SelfTestExpect(
+      state, std::strstr(securityHtml.data, "href=\"javascript:") == nullptr,
+      "Markdown link blocks javascript scheme");
+  SelfTestExpect(state,
+                 std::strstr(securityHtml.data, "src=\"javascript:") == nullptr,
+                 "Markdown image blocks javascript scheme");
+  SelfTestExpect(state,
+                 std::strstr(securityHtml.data,
+                             "href=\"https://example.com/a_(b)\"") != nullptr,
+                 "Markdown link supports nested URL parentheses");
+  SelfTestExpect(state, std::strstr(securityHtml.data, "bad\"id") == nullptr,
+                 "Footnote id rejects unsafe characters");
 }
 
 /**
@@ -2862,6 +2889,13 @@ bool ParseFootnoteDefinitionLine(const char* line,
   size_t i = 2U;
   size_t idLen = 0U;
   while (i < lineLen && line[i] != ']') {
+    const char ch = line[i];
+    const bool safeIdChar =
+        ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+         (ch >= '0' && ch <= '9') || ch == '-' || ch == '_');
+    if (!safeIdChar) {
+      return false;
+    }
     if (idLen + 1U >= idSize) {
       return false;
     }
@@ -2884,6 +2918,102 @@ bool ParseFootnoteDefinitionLine(const char* line,
   id[idLen] = '\0';
   text[textLen] = '\0';
   return idLen > 0U;
+}
+
+/**
+ * Purpose: Determine if markdown URL target uses a permitted scheme/prefix.
+ * Inputs: URL text pointer/length and whether `mailto:` is allowed.
+ * Outputs: Returns true for safe links/images; false for dangerous schemes.
+ */
+bool IsSafeMarkdownUrl(const char* url, size_t len, bool allowMailto) {
+  if (url == nullptr || len == 0U) {
+    return false;
+  }
+  size_t start = 0U;
+  while (start < len && (url[start] == ' ' || url[start] == '\t')) {
+    start++;
+  }
+  while (len > start && (url[len - 1U] == ' ' || url[len - 1U] == '\t')) {
+    len--;
+  }
+  if (start >= len) {
+    return false;
+  }
+
+  const char first = url[start];
+  if (first == '/' || first == '#') {
+    return true;
+  }
+  if (len - start >= 2U && url[start] == '.' && url[start + 1U] == '/') {
+    return true;
+  }
+  if (len - start >= 3U && url[start] == '.' && url[start + 1U] == '.' &&
+      url[start + 2U] == '/') {
+    return true;
+  }
+
+  size_t colonPos = static_cast<size_t>(-1);
+  for (size_t i = start; i < len; i++) {
+    const char ch = url[i];
+    if (ch == ':') {
+      colonPos = i;
+      break;
+    }
+    if (ch == '/' || ch == '?' || ch == '#') {
+      break;
+    }
+  }
+  if (colonPos == static_cast<size_t>(-1)) {
+    return true;
+  }
+
+  char scheme[16];
+  const size_t schemeLen = colonPos - start;
+  if (schemeLen == 0U || schemeLen + 1U > sizeof(scheme)) {
+    return false;
+  }
+  for (size_t i = 0; i < schemeLen; i++) {
+    scheme[i] = static_cast<char>(ToLowerAscii(url[start + i]));
+  }
+  scheme[schemeLen] = '\0';
+
+  if (std::strcmp(scheme, "http") == 0 || std::strcmp(scheme, "https") == 0) {
+    return true;
+  }
+  if (allowMailto && std::strcmp(scheme, "mailto") == 0) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Purpose: Find closing `)` for markdown link/image target with nested parens.
+ * Inputs: text span and index pointing at first character after opening `(`.
+ * Outputs: true with `closeParenOut` set when a matching close is found.
+ */
+bool FindMarkdownLinkCloseParen(const char* text,
+                                size_t len,
+                                size_t start,
+                                size_t* closeParenOut) {
+  size_t depth = 0U;
+  for (size_t i = start; i < len; i++) {
+    if (text[i] == '\\' && i + 1U < len) {
+      i++;
+      continue;
+    }
+    if (text[i] == '(') {
+      depth++;
+      continue;
+    }
+    if (text[i] == ')') {
+      if (depth == 0U) {
+        *closeParenOut = i;
+        return true;
+      }
+      depth--;
+    }
+  }
+  return false;
 }
 
 /**
@@ -2924,11 +3054,17 @@ bool WriteInlineMarkdown(TextBuffer* out,
         closeBracket++;
       }
       if (closeBracket + 1U < len && text[closeBracket + 1U] == '(') {
-        size_t closeParen = closeBracket + 2U;
-        while (closeParen < len && text[closeParen] != ')') {
-          closeParen++;
-        }
-        if (closeParen < len) {
+        size_t closeParen = 0U;
+        if (FindMarkdownLinkCloseParen(text, len, closeBracket + 2U,
+                                       &closeParen)) {
+          const size_t urlLen = closeParen - (closeBracket + 2U);
+          if (!IsSafeMarkdownUrl(text + closeBracket + 2U, urlLen, false)) {
+            if (!BufferAppendEscaped(out, text + i, closeParen + 1U - i)) {
+              return false;
+            }
+            i = closeParen + 1U;
+            continue;
+          }
           if (!BufferAppend(out,
                             "<figure class=\"margin-figure\"><a href=\"")) {
             return false;
@@ -3086,11 +3222,17 @@ bool WriteInlineMarkdown(TextBuffer* out,
         closeBracket++;
       }
       if (closeBracket + 1U < len && text[closeBracket + 1U] == '(') {
-        size_t closeParen = closeBracket + 2U;
-        while (closeParen < len && text[closeParen] != ')') {
-          closeParen++;
-        }
-        if (closeParen < len) {
+        size_t closeParen = 0U;
+        if (FindMarkdownLinkCloseParen(text, len, closeBracket + 2U,
+                                       &closeParen)) {
+          const size_t urlLen = closeParen - (closeBracket + 2U);
+          if (!IsSafeMarkdownUrl(text + closeBracket + 2U, urlLen, true)) {
+            if (!BufferAppendEscaped(out, text + i, closeParen + 1U - i)) {
+              return false;
+            }
+            i = closeParen + 1U;
+            continue;
+          }
           if (!BufferAppend(out, "<a href=\"")) {
             return false;
           }

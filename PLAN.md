@@ -12,6 +12,6 @@ a very simple wiki with a simple WYSIWYG-style editor or markdown editor, simila
 * page data stored as markdown files in database. all other required data about a page is stored in database
 * minimal (preferably zero) javascript
 * intended to have a reverse proxy in front of it, so no TLS or certificate handling requirements
-* in C++ using this version of the NASA cody standards - https://nasa.github.io/fprime/UsersGuide/dev/code-style.html
+* in C++ using this version of NASA coding standards - https://nasa.github.io/fprime/UsersGuide/dev/code-style.html
 * as low of a memory footprint as possible. as small of a binary as possible. low cpu usage
 * mediawiki as the wiki model

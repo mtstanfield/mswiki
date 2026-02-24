@@ -1,4 +1,5 @@
 .git
 build
+fuzz-build
 mswiki
 *.db
