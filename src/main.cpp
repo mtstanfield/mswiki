@@ -552,6 +552,62 @@ size_t UrlDecode(char* out, size_t outSize, const char* in, size_t inLen) {
 }
 
 /**
+ * Purpose: Decode percent-encoded URL text with strict overflow signaling.
+ * Inputs: `out` writable buffer with `outSize`; `in` encoded bytes and `inLen`;
+ * optional decoded-length output `outLen`.
+ * Outputs: Returns true on full decode without truncation; false when output
+ * capacity is insufficient.
+ */
+bool UrlDecodeStrict(char* out,
+                     size_t outSize,
+                     const char* in,
+                     size_t inLen,
+                     size_t* outLen) {
+  if (outSize == 0U) {
+    if (outLen != nullptr) {
+      *outLen = 0U;
+    }
+    return false;
+  }
+
+  size_t decodedLen = 0U;
+  for (size_t i = 0; i < inLen; i++) {
+    if (decodedLen + 1U >= outSize) {
+      out[decodedLen] = '\0';
+      if (outLen != nullptr) {
+        *outLen = decodedLen;
+      }
+      return false;
+    }
+
+    if (in[i] == '%' && i + 2U < inLen && IsHexDigitAscii(in[i + 1U]) &&
+        IsHexDigitAscii(in[i + 2U])) {
+      const int hi = HexDigitValue(in[i + 1U]);
+      const int lo = HexDigitValue(in[i + 2U]);
+      const unsigned int decoded = static_cast<unsigned int>((hi << 4) | lo);
+      if (decoded == 0U) {
+        out[decodedLen] = '\0';
+        if (outLen != nullptr) {
+          *outLen = decodedLen;
+        }
+        return false;
+      }
+      out[decodedLen++] = static_cast<char>(decoded);
+      i += 2U;
+      continue;
+    }
+
+    out[decodedLen++] = (in[i] == '+') ? ' ' : in[i];
+  }
+
+  out[decodedLen] = '\0';
+  if (outLen != nullptr) {
+    *outLen = decodedLen;
+  }
+  return true;
+}
+
+/**
  * Purpose: Encode a string for URL-safe usage while preserving common safe
  * characters. Inputs: `in` source C string; `out` destination buffer; `outSize`
  * capacity. Outputs: Returns true on full encode; false if destination capacity
@@ -853,6 +909,14 @@ void SelfTestSlugAndCodec(SelfTestState* state) {
   (void)UrlDecode(decoded, sizeof(decoded), "bad%00value", 11U);
   SelfTestExpect(state, std::strcmp(decoded, "bad%00value") == 0,
                  "UrlDecode leaves encoded NUL literal");
+  SelfTestExpect(state, !DecodeRouteSlugStrict("ok%00bad", slug, sizeof(slug)),
+                 "DecodeRouteSlugStrict rejects encoded NUL");
+  char longSlugInput[MAX_SLUG + 32U];
+  (void)std::memset(longSlugInput, 'a', sizeof(longSlugInput));
+  longSlugInput[sizeof(longSlugInput) - 1U] = '\0';
+  SelfTestExpect(state,
+                 !DecodeRouteSlugStrict(longSlugInput, slug, sizeof(slug)),
+                 "DecodeRouteSlugStrict rejects decode truncation");
 
   int parsedPositive = 0;
   SelfTestExpect(state, ParsePositiveIntStrict("42", &parsedPositive),
@@ -939,6 +1003,10 @@ void SelfTestFormAndMultipart(SelfTestState* state) {
       "ParseFormField markdown exists");
   SelfTestExpect(state, std::strcmp(markdown, "Line1\nLine2") == 0,
                  "ParseFormField decodes percent escapes");
+  char tinyTitle[8];
+  SelfTestExpect(
+      state, !ParseFormField(&request, "title", tinyTitle, sizeof(tinyTitle)),
+      "ParseFormField rejects decode truncation");
 
   (void)std::memset(&request, 0, sizeof(request));
   request.headerCount = 1;
@@ -1222,6 +1290,14 @@ void SelfTestHttpHandler(SelfTestState* state) {
   SelfTestExpect(state,
                  !ParseRequestLine("GET noslash HTTP/1.1", &parsedRequest),
                  "ParseRequestLine rejects non-origin-form target");
+  unsigned char rawEmbeddedNul[] = {
+      'G', 'E',  'T',  ' ', '/', ' ', 'H', 'T',  'T',  'P',  '/', '1',  '.',
+      '1', '\r', '\n', 'H', 'o', 's', 't', ':',  ' ',  'w',  'i', '\0', 'k',
+      'i', '.',  'l',  'o', 'c', 'a', 'l', '\r', '\n', '\r', '\n'};
+  SelfTestExpect(state,
+                 !ParseHttpRequest(rawEmbeddedNul, sizeof(rawEmbeddedNul),
+                                   &parsedRequest, &bodyStart, &bodyOffset),
+                 "ParseHttpRequest rejects embedded NUL in headers");
 
   HttpRequest badImageIdRequest;
   HttpResponse badImageIdResponse;
@@ -1396,6 +1472,11 @@ int RunSelfTests() {
  * error.
  */
 void SetError(HttpResponse* response, int status, const char* message) {
+  if (message == nullptr) {
+    SetResponse(response, 500, "text/plain; charset=utf-8",
+                reinterpret_cast<const unsigned char*>("internal error"), 14U);
+    return;
+  }
   const size_t len = std::strlen(message);
   if (len >= sizeof(gResponseBuffer)) {
     SetResponse(response, 500, "text/plain; charset=utf-8",
@@ -1471,7 +1552,14 @@ bool ParseRequestLine(const char* line, HttpRequest* request) {
  * safe-slug rules.
  */
 bool DecodeRouteSlugStrict(const char* encoded, char* slug, size_t slugSize) {
-  (void)UrlDecode(slug, slugSize, encoded, std::strlen(encoded));
+  size_t decodedLen = 0U;
+  if (!UrlDecodeStrict(slug, slugSize, encoded, std::strlen(encoded),
+                       &decodedLen)) {
+    return false;
+  }
+  if (decodedLen == 0U) {
+    return false;
+  }
   if (slug[0] == '\0') {
     return false;
   }
@@ -1504,6 +1592,11 @@ bool ParseHttpRequest(unsigned char* raw,
   }
   if (!found) {
     return false;
+  }
+  for (size_t i = 0; i < headerEnd; i++) {
+    if (raw[i] == '\0') {
+      return false;
+    }
   }
 
   raw[headerEnd] = '\0';
@@ -2713,6 +2806,9 @@ bool ParseFormField(const HttpRequest* request,
                     const char* key,
                     char* out,
                     size_t outSize) {
+  if (out == nullptr || outSize == 0U) {
+    return false;
+  }
   out[0] = '\0';
   if (request->bodyLen == 0U || request->body == nullptr) {
     return false;
@@ -2736,8 +2832,7 @@ bool ParseFormField(const HttpRequest* request,
         std::strncmp(body + pos, needle, std::strlen(needle)) == 0) {
       const char* encodedValue = body + pos + std::strlen(needle);
       const size_t encodedLen = tokenLen - std::strlen(needle);
-      (void)UrlDecode(out, outSize, encodedValue, encodedLen);
-      return true;
+      return UrlDecodeStrict(out, outSize, encodedValue, encodedLen, nullptr);
     }
 
     if (end >= request->bodyLen) {
@@ -4025,6 +4120,7 @@ void HandleRequest(sqlite3* db,
       std::strcmp(request->path, "/pages") == 0) {
     TextBuffer html;
     char err[256];
+    (void)CopyString(err, sizeof(err), "Failed to build pages");
     if (!ArenaAllocTextBuffer(arena, &html, MAX_RESPONSE_BYTES)) {
       SetError(response, 500, "Response arena exhausted");
       return;
@@ -4344,6 +4440,7 @@ void HandleRequest(sqlite3* db,
     PageRecord pageRecord;
     bool found = false;
     char err[256];
+    (void)CopyString(err, sizeof(err), "Failed to build page");
     if (!DbGetPage(db, slug, &pageRecord, &found, err, sizeof(err))) {
       SetError(response, 500, err);
       return;
