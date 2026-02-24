@@ -603,6 +603,36 @@ void SelfTestParseArgs(SelfTestState* state) {
 }
 
 /*
+ * Verify response body copy preserves bytes and respects buffer limits.
+ */
+void SelfTestResponseCopy(SelfTestState* state) {
+  HttpResponse response;
+  static const char HTML_BODY[] =
+      "<script>if(a<b){window.x='</not-a-tag>';}</script><p>ok</p>";
+  const bool htmlOk = SetResponseCopy(
+      &response, 200, "text/html; charset=utf-8", HTML_BODY,
+      sizeof(HTML_BODY) - 1U);
+  SelfTestExpect(state, htmlOk, "SetResponseCopy accepts HTML body");
+  SelfTestExpect(state, response.bodyLen == (sizeof(HTML_BODY) - 1U),
+                 "SetResponseCopy preserves HTML length");
+  SelfTestExpect(
+      state,
+      std::memcmp(response.body, HTML_BODY, sizeof(HTML_BODY) - 1U) == 0,
+      "SetResponseCopy preserves HTML bytes");
+
+  static const char TEXT_BODY[] = "plain text";
+  const bool textOk = SetResponseCopy(
+      &response, 200, "text/plain; charset=utf-8", TEXT_BODY,
+      sizeof(TEXT_BODY) - 1U);
+  SelfTestExpect(state, textOk, "SetResponseCopy accepts text body");
+  SelfTestExpect(state, response.bodyLen == (sizeof(TEXT_BODY) - 1U),
+                 "SetResponseCopy preserves text length");
+  SelfTestExpect(
+      state, std::memcmp(response.body, TEXT_BODY, sizeof(TEXT_BODY) - 1U) == 0,
+      "SetResponseCopy preserves text bytes");
+}
+
+/*
  * Run full built-in self-test suite and print aggregate result.
  */
 int RunSelfTests() {
@@ -617,6 +647,7 @@ int RunSelfTests() {
   SelfTestHttpHandler(&state);
   SelfTestSocketRequestValidation(&state);
   SelfTestParseArgs(&state);
+  SelfTestResponseCopy(&state);
 
   std::printf("Self-test results: passed=%d failed=%d\n", state.passed,
               state.failed);

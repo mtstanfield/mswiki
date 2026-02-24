@@ -744,117 +744,14 @@ void SetResponse(HttpResponse* response,
 
 /*
  * Copy a textual body into stable storage before assigning response.
+ * This function is intentionally byte-preserving and does not transform
+ * the response body.
  */
 bool SetResponseCopy(HttpResponse* response,
                      int status,
                      const char* contentType,
                      const char* body,
                      size_t bodyLen) {
-  if (contentType != nullptr && body != nullptr &&
-      std::strncmp(contentType, "text/html", 9U) == 0) {
-    TextBuffer formatted;
-    formatted.data = reinterpret_cast<char*>(gResponseBuffer);
-    formatted.capacity = sizeof(gResponseBuffer);
-    BufferReset(&formatted);
-
-    bool inRawText = false;
-    size_t i = 0U;
-    while (i < bodyLen) {
-      const char ch = body[i];
-      if (ch != '<') {
-        if (!BufferAppendChar(&formatted, ch)) {
-          return false;
-        }
-        i += 1U;
-        continue;
-      }
-
-      size_t tagEnd = i + 1U;
-      while (tagEnd < bodyLen && body[tagEnd] != '>') {
-        tagEnd += 1U;
-      }
-      if (tagEnd >= bodyLen) {
-        if (!BufferAppendBytes(&formatted, body + i, bodyLen - i)) {
-          return false;
-        }
-        break;
-      }
-
-      if (!BufferAppendBytes(&formatted, body + i, (tagEnd - i) + 1U)) {
-        return false;
-      }
-
-      size_t namePos = i + 1U;
-      bool closingTag = false;
-      if (namePos < tagEnd && body[namePos] == '/') {
-        closingTag = true;
-        namePos += 1U;
-      }
-      while (namePos < tagEnd &&
-             (body[namePos] == ' ' || body[namePos] == '\t' ||
-              body[namePos] == '\r' || body[namePos] == '\n')) {
-        namePos += 1U;
-      }
-
-      char tagName[16];
-      size_t tagNameLen = 0U;
-      while (namePos < tagEnd && tagNameLen + 1U < sizeof(tagName)) {
-        const char current = body[namePos];
-        const bool alphaNumeric =
-            (current >= 'a' && current <= 'z') ||
-            (current >= 'A' && current <= 'Z') ||
-            (current >= '0' && current <= '9') || current == '-' ||
-            current == '_';
-        if (!alphaNumeric) {
-          break;
-        }
-        tagName[tagNameLen] = static_cast<char>(ToLowerAscii(current));
-        tagNameLen += 1U;
-        namePos += 1U;
-      }
-      tagName[tagNameLen] = '\0';
-
-      if (tagNameLen > 0U &&
-          (std::strcmp(tagName, "script") == 0 ||
-           std::strcmp(tagName, "style") == 0)) {
-        if (closingTag) {
-          inRawText = false;
-        } else {
-          bool selfClosing = false;
-          size_t scan = tagEnd;
-          while (scan > i) {
-            scan -= 1U;
-            if (body[scan] == '/') {
-              selfClosing = true;
-              break;
-            }
-            if (body[scan] != ' ' && body[scan] != '\t' && body[scan] != '\r' &&
-                body[scan] != '\n') {
-              break;
-            }
-          }
-          if (!selfClosing) {
-            inRawText = true;
-          }
-        }
-      }
-
-      if (!inRawText) {
-        const size_t next = tagEnd + 1U;
-        if (next < bodyLen && body[next] == '<') {
-          if (!BufferAppendChar(&formatted, '\n')) {
-            return false;
-          }
-        }
-      }
-
-      i = tagEnd + 1U;
-    }
-
-    SetResponse(response, status, contentType, gResponseBuffer, formatted.length);
-    return true;
-  }
-
   if (bodyLen > sizeof(gResponseBuffer)) {
     return false;
   }
@@ -954,9 +851,12 @@ const char* DetectImageMimeFromData(const unsigned char* data, size_t len) {
  */
 bool BuildPageLayout(const char* title, const char* content, TextBuffer* out) {
   if (!BufferAppend(out,
-                    "<!doctype html><html><head><meta charset=\"utf-8\">"
+                    "<!doctype html>\n"
+                    "<html>\n"
+                    "<head>\n"
+                    "<meta charset=\"utf-8\">\n"
                     "<meta name=\"viewport\" "
-                    "content=\"width=device-width,initial-scale=1\">"
+                    "content=\"width=device-width,initial-scale=1\">\n"
                     "<title>")) {
     return false;
   }
@@ -964,13 +864,16 @@ bool BuildPageLayout(const char* title, const char* content, TextBuffer* out) {
     return false;
   }
   if (!BufferAppend(out,
-                    " - mswiki</title>"
+                    " - mswiki</title>\n"
                     "<link rel=\"icon\" href=\"data:image/svg+xml,%3Csvg%20"
                     "xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20"
                     "100%20100'%3E%3Ctext%20y='.9em'%20font-size='90'%3E%F0"
-                    "%9F%90%B1%3C/text%3E%3C/svg%3E\">"
-                    "<link rel=\"stylesheet\" href=\"/style.css\"></head><body>"
-                    "<header><div class=\"header-inner\"><a class=\"brand\" "
+                    "%9F%90%B1%3C/text%3E%3C/svg%3E\">\n"
+                    "<link rel=\"stylesheet\" href=\"/style.css\">\n"
+                    "</head>\n"
+                    "<body>\n"
+                    "<header>\n"
+                    "<div class=\"header-inner\"><a class=\"brand\" "
                     "href=\"/page/home\">")) {
     return false;
   }
@@ -978,13 +881,15 @@ bool BuildPageLayout(const char* title, const char* content, TextBuffer* out) {
                     "<strong>mswiki</strong></a><nav>"
                     "<a href=\"/page/home\">Home</a>"
                     "<a href=\"/pages\">All Pages</a>"
-                    "</nav></div></header><main>")) {
+                    "</nav></div>\n"
+                    "</header>\n"
+                    "<main>\n")) {
     return false;
   }
   if (!BufferAppend(out, content)) {
     return false;
   }
-  if (!BufferAppend(out, "</main></body></html>")) {
+  if (!BufferAppend(out, "\n</main>\n</body>\n</html>\n")) {
     return false;
   }
 

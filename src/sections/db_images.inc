@@ -5,7 +5,7 @@
  */
 
 /*
- * Append page-image list HTML including markdown snippets/actions.
+ * Append page-image list HTML with image links and edit-page actions.
  */
 bool DbAppendImagesHtml(sqlite3* db,
                         const char* slug,
@@ -44,7 +44,7 @@ bool DbAppendImagesHtml(sqlite3* db,
     }
 
     if (!any) {
-      if (!BufferAppend(html, "<ul class=\"images\">")) {
+      if (!BufferAppend(html, "<ul class=\"images\">\n")) {
         (void)sqlite3_finalize(stmt);
         return false;
       }
@@ -115,7 +115,7 @@ bool DbAppendImagesHtml(sqlite3* db,
         return false;
       }
     }
-    if (!BufferAppend(html, "</li>")) {
+    if (!BufferAppend(html, "</li>\n")) {
       (void)sqlite3_finalize(stmt);
       return false;
     }
@@ -123,12 +123,12 @@ bool DbAppendImagesHtml(sqlite3* db,
 
   if (!any) {
     if (!BufferAppend(
-            html, "<p class=\"meta\">No images uploaded for this page.</p>")) {
+            html, "<p class=\"meta\">No images uploaded for this page.</p>\n")) {
       (void)sqlite3_finalize(stmt);
       return false;
     }
   } else {
-    if (!BufferAppend(html, "</ul>")) {
+    if (!BufferAppend(html, "</ul>\n")) {
       (void)sqlite3_finalize(stmt);
       return false;
     }

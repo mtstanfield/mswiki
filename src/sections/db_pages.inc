@@ -302,7 +302,7 @@ bool DbListPagesHtml(sqlite3* db, TextBuffer* html, char* err, size_t errSize) {
       (void)sqlite3_finalize(stmt);
       return false;
     }
-    if (!BufferAppend(html, ")</span></li>")) {
+    if (!BufferAppend(html, ")</span></li>\n")) {
       (void)sqlite3_finalize(stmt);
       return false;
     }
@@ -348,7 +348,7 @@ bool DbAppendBacklinksHtml(sqlite3* db,
       continue;
     }
     if (!any) {
-      if (!BufferAppend(html, "<ul class=\"backlinks\">")) {
+      if (!BufferAppend(html, "<ul class=\"backlinks\">\n")) {
         (void)sqlite3_finalize(stmt);
         return false;
       }
@@ -374,19 +374,19 @@ bool DbAppendBacklinksHtml(sqlite3* db,
       (void)sqlite3_finalize(stmt);
       return false;
     }
-    if (!BufferAppend(html, "</a></li>")) {
+    if (!BufferAppend(html, "</a></li>\n")) {
       (void)sqlite3_finalize(stmt);
       return false;
     }
   }
 
   if (!any) {
-    if (!BufferAppend(html, "<p class=\"meta\">No backlinks yet.</p>")) {
+    if (!BufferAppend(html, "<p class=\"meta\">No backlinks yet.</p>\n")) {
       (void)sqlite3_finalize(stmt);
       return false;
     }
   } else {
-    if (!BufferAppend(html, "</ul>")) {
+    if (!BufferAppend(html, "</ul>\n")) {
       (void)sqlite3_finalize(stmt);
       return false;
     }

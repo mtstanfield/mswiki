@@ -456,18 +456,18 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
 
     if (lineLen >= 3U && std::strncmp(line, "```", 3) == 0) {
       if (inList) {
-        if (!BufferAppend(html, "</ul>")) {
+        if (!BufferAppend(html, "</ul>\n")) {
           return false;
         }
         inList = false;
       }
       if (!inCodeBlock) {
-        if (!BufferAppend(html, "<pre><code>")) {
+        if (!BufferAppend(html, "<pre><code>\n")) {
           return false;
         }
         inCodeBlock = true;
       } else {
-        if (!BufferAppend(html, "</code></pre>")) {
+        if (!BufferAppend(html, "</code></pre>\n")) {
           return false;
         }
         inCodeBlock = false;
@@ -481,7 +481,7 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
       }
     } else if (lineLen == 0U) {
       if (inList) {
-        if (!BufferAppend(html, "</ul>")) {
+        if (!BufferAppend(html, "</ul>\n")) {
           return false;
         }
         inList = false;
@@ -489,7 +489,7 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
     } else if (lineLen > 2U && (line[0] == '-' || line[0] == '*') &&
                line[1] == ' ') {
       if (!inList) {
-        if (!BufferAppend(html, "<ul>")) {
+        if (!BufferAppend(html, "<ul>\n")) {
           return false;
         }
         inList = true;
@@ -502,12 +502,12 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
                                &nextFootnoteNumber)) {
         return false;
       }
-      if (!BufferAppend(html, "</li>")) {
+      if (!BufferAppend(html, "</li>\n")) {
         return false;
       }
     } else {
       if (inList) {
-        if (!BufferAppend(html, "</ul>")) {
+        if (!BufferAppend(html, "</ul>\n")) {
           return false;
         }
         inList = false;
@@ -528,7 +528,7 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
                                  &nextFootnoteNumber)) {
           return false;
         }
-        if (!BufferAppendFormat(html, "</h%zu>", hashes)) {
+        if (!BufferAppendFormat(html, "</h%zu>\n", hashes)) {
           return false;
         }
       } else {
@@ -540,7 +540,7 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
                                  &nextFootnoteNumber)) {
           return false;
         }
-        if (!BufferAppend(html, "</p>")) {
+        if (!BufferAppend(html, "</p>\n")) {
           return false;
         }
       }
@@ -553,12 +553,12 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
   }
 
   if (inList) {
-    if (!BufferAppend(html, "</ul>")) {
+    if (!BufferAppend(html, "</ul>\n")) {
       return false;
     }
   }
   if (inCodeBlock) {
-    if (!BufferAppend(html, "</code></pre>")) {
+    if (!BufferAppend(html, "</code></pre>\n")) {
       return false;
     }
   }
@@ -573,7 +573,7 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
   if (anyFootnotes) {
     if (!BufferAppend(
             html,
-            "<section class=\"panel footnotes\"><h2>Footnotes</h2><ol>")) {
+            "<section class=\"panel footnotes\">\n<h2>Footnotes</h2>\n<ol>\n")) {
       return false;
     }
     for (size_t i = 0; i < footnoteCount; i++) {
@@ -587,11 +587,11 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
                                std::strlen(footnoteText[i]))) {
         return false;
       }
-      if (!BufferAppend(html, "</li>")) {
+      if (!BufferAppend(html, "</li>\n")) {
         return false;
       }
     }
-    if (!BufferAppend(html, "</ol></section>")) {
+    if (!BufferAppend(html, "</ol>\n</section>\n")) {
       return false;
     }
   }
