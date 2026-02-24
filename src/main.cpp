@@ -162,6 +162,7 @@ bool ParseHttpRequest(unsigned char* raw,
                       HttpRequest* request,
                       const unsigned char** bodyStart,
                       size_t* bodyOffset);
+bool DecodeRouteSlugStrict(const char* encoded, char* slug, size_t slugSize);
 bool ReadRequestFromSocket(int clientFd,
                            size_t maxBodyBytes,
                            unsigned char* out,
@@ -1121,6 +1122,12 @@ void SelfTestHttpHandler(SelfTestState* state) {
                  std::strstr(reinterpret_cast<const char*>(response.body),
                              "Create this page") != nullptr,
                  "Deleted page behaves as missing");
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "POST");
+  (void)CopyString(request.path, sizeof(request.path), "/delete/%00");
+  HandleRequest(db, &config, &request, &response);
+  SelfTestExpect(state, response.status == 400,
+                 "HandleRequest rejects encoded-NUL slug");
 
   HttpRequest parsedRequest;
   (void)std::memset(&parsedRequest, 0, sizeof(parsedRequest));
@@ -1243,20 +1250,12 @@ void SelfTestSocketRequestValidation(SelfTestState* state) {
       continue;
     }
 
-    unsigned char* scratch =
-        reinterpret_cast<unsigned char*>(std::malloc(MAX_REQUEST_BYTES));
-    if (scratch == nullptr) {
-      (void)close(fds[0]);
-      (void)close(fds[1]);
-      SelfTestExpect(state, false, cases[i].name);
-      continue;
-    }
+    static unsigned char scratch[MAX_REQUEST_BYTES];
 
     size_t outLen = 0U;
     bool tooLarge = false;
     const bool ok = ReadRequestFromSocket(fds[1], MAX_BODY_BYTES, scratch,
                                           &outLen, &tooLarge);
-    std::free(scratch);
     (void)close(fds[0]);
     (void)close(fds[1]);
 
@@ -1361,6 +1360,21 @@ bool ParseRequestLine(const char* line, HttpRequest* request) {
   }
 
   return true;
+}
+
+/**
+ * Purpose: Decode and validate a route slug/path component without slugify
+ * fallback. Inputs: `encoded` URL-encoded path segment, `slug` output buffer,
+ * `slugSize`. Outputs: Returns true when decoded slug is non-empty and matches
+ * safe-slug rules.
+ */
+bool DecodeRouteSlugStrict(const char* encoded, char* slug, size_t slugSize) {
+  (void)UrlDecode(slug, slugSize, encoded, std::strlen(encoded));
+  if (slug[0] == '\0') {
+    return false;
+  }
+  LowerString(slug);
+  return IsSafeSlug(slug);
 }
 
 /**
@@ -1570,9 +1584,19 @@ bool ReadRequestFromSocket(int clientFd,
  * text set.
  */
 bool DbOpen(sqlite3** db, const char* dbPath, char* err, size_t errSize) {
+  if (db == nullptr) {
+    (void)std::snprintf(err, errSize, "invalid database handle pointer");
+    return false;
+  }
   const int openFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE;
   if (sqlite3_open_v2(dbPath, db, openFlags, nullptr) != SQLITE_OK) {
-    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(*db));
+    const char* msg = "sqlite open failed";
+    if (*db != nullptr) {
+      msg = sqlite3_errmsg(*db);
+      (void)sqlite3_close(*db);
+      *db = nullptr;
+    }
+    (void)std::snprintf(err, errSize, "%s", msg);
     return false;
   }
   sqlite3_extended_result_codes(*db, 1);
@@ -1614,6 +1638,10 @@ bool DbOpen(sqlite3** db, const char* dbPath, char* err, size_t errSize) {
                         sqliteErr == nullptr ? "sqlite error" : sqliteErr);
     if (sqliteErr != nullptr) {
       sqlite3_free(sqliteErr);
+    }
+    if (*db != nullptr) {
+      (void)sqlite3_close(*db);
+      *db = nullptr;
     }
     return false;
   }
@@ -1927,10 +1955,12 @@ bool DbListPagesHtml(sqlite3* db, TextBuffer* html, char* err, size_t errSize) {
     return false;
   }
 
-  while (true) {
+  bool done = false;
+  while (!done) {
     const int rc = sqlite3_step(stmt);
     if (rc == SQLITE_DONE) {
-      break;
+      done = true;
+      continue;
     }
     if (rc != SQLITE_ROW) {
       (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
@@ -2005,10 +2035,12 @@ bool DbAppendBacklinksHtml(sqlite3* db,
 
   (void)sqlite3_bind_text(stmt, 1, slug, -1, SQLITE_TRANSIENT);
   bool any = false;
-  while (true) {
+  bool done = false;
+  while (!done) {
     const int rc = sqlite3_step(stmt);
     if (rc == SQLITE_DONE) {
-      break;
+      done = true;
+      continue;
     }
     if (rc != SQLITE_ROW) {
       (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
@@ -2091,10 +2123,12 @@ bool DbAppendImagesHtml(sqlite3* db,
 
   (void)sqlite3_bind_text(stmt, 1, slug, -1, SQLITE_TRANSIENT);
   bool any = false;
-  while (true) {
+  bool done = false;
+  while (!done) {
     const int rc = sqlite3_step(stmt);
     if (rc == SQLITE_DONE) {
-      break;
+      done = true;
+      continue;
     }
     if (rc != SQLITE_ROW) {
       (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
@@ -2422,7 +2456,7 @@ void ParseMultipartImage(const HttpRequest* request, MultipartImage* image) {
   const unsigned char* search = body;
   size_t remaining = bodyLen;
 
-  while (true) {
+  while (remaining > 0U) {
     const unsigned char* partStart = FindBytes(
         search, remaining, reinterpret_cast<const unsigned char*>(delimiter),
         std::strlen(delimiter));
@@ -2504,7 +2538,8 @@ void ParseMultipartImage(const HttpRequest* request, MultipartImage* image) {
       return;
     }
 
-    while (true) {
+    bool foundPartEnd = false;
+    while (!foundPartEnd) {
       const unsigned char* candidate =
           FindBytes(dataEnd, bodyLen - static_cast<size_t>(dataEnd - body),
                     reinterpret_cast<const unsigned char*>("\r\n"), 2U);
@@ -2517,7 +2552,8 @@ void ParseMultipartImage(const HttpRequest* request, MultipartImage* image) {
           std::memcmp(body + afterCrLfOffset, delimiter,
                       std::strlen(delimiter)) == 0) {
         dataEnd = candidate;
-        break;
+        foundPartEnd = true;
+        continue;
       }
       dataEnd = candidate + 2U;
     }
@@ -3194,6 +3230,15 @@ bool ReadFile(const char* path,
       break;
     }
     *outLen += static_cast<size_t>(n);
+  }
+
+  if (*outLen == dstSize) {
+    unsigned char extra = 0U;
+    const ssize_t extraRead = read(fd, &extra, 1U);
+    if (extraRead != 0) {
+      (void)close(fd);
+      return false;
+    }
   }
 
   (void)close(fd);
@@ -4055,11 +4100,8 @@ void HandleRequest(sqlite3* db,
 
   if (std::strcmp(request->method, "GET") == 0 &&
       std::strncmp(request->path, "/raw/", 5) == 0) {
-    char decoded[MAX_PATH];
-    (void)UrlDecode(decoded, sizeof(decoded), request->path + 5,
-                    std::strlen(request->path + 5));
     char slug[MAX_SLUG];
-    if (!Slugify(decoded, slug, sizeof(slug)) || !IsSafeSlug(slug)) {
+    if (!DecodeRouteSlugStrict(request->path + 5, slug, sizeof(slug))) {
       SetError(response, 400, "Invalid page slug");
       return;
     }
@@ -4086,11 +4128,8 @@ void HandleRequest(sqlite3* db,
 
   if (std::strcmp(request->method, "GET") == 0 &&
       std::strncmp(request->path, "/edit/", 6) == 0) {
-    char decoded[MAX_PATH];
-    (void)UrlDecode(decoded, sizeof(decoded), request->path + 6,
-                    std::strlen(request->path + 6));
     char slug[MAX_SLUG];
-    if (!Slugify(decoded, slug, sizeof(slug)) || !IsSafeSlug(slug)) {
+    if (!DecodeRouteSlugStrict(request->path + 6, slug, sizeof(slug))) {
       SetError(response, 400, "Invalid page slug");
       return;
     }
@@ -4138,11 +4177,8 @@ void HandleRequest(sqlite3* db,
       return;
     }
 
-    char decoded[MAX_PATH];
-    (void)UrlDecode(decoded, sizeof(decoded), request->path + 6,
-                    std::strlen(request->path + 6));
     char slug[MAX_SLUG];
-    if (!Slugify(decoded, slug, sizeof(slug)) || !IsSafeSlug(slug)) {
+    if (!DecodeRouteSlugStrict(request->path + 6, slug, sizeof(slug))) {
       SetError(response, 400, "Invalid page slug");
       return;
     }
@@ -4178,11 +4214,8 @@ void HandleRequest(sqlite3* db,
 
   if (std::strcmp(request->method, "POST") == 0 &&
       std::strncmp(request->path, "/delete/", 8) == 0) {
-    char decoded[MAX_PATH];
-    (void)UrlDecode(decoded, sizeof(decoded), request->path + 8,
-                    std::strlen(request->path + 8));
     char slug[MAX_SLUG];
-    if (!Slugify(decoded, slug, sizeof(slug)) || !IsSafeSlug(slug)) {
+    if (!DecodeRouteSlugStrict(request->path + 8, slug, sizeof(slug))) {
       SetError(response, 400, "Invalid page slug");
       return;
     }
@@ -4198,11 +4231,8 @@ void HandleRequest(sqlite3* db,
 
   if (std::strcmp(request->method, "GET") == 0 &&
       std::strncmp(request->path, "/images/new/", 12) == 0) {
-    char decoded[MAX_PATH];
-    (void)UrlDecode(decoded, sizeof(decoded), request->path + 12,
-                    std::strlen(request->path + 12));
     char slug[MAX_SLUG];
-    if (!Slugify(decoded, slug, sizeof(slug)) || !IsSafeSlug(slug)) {
+    if (!DecodeRouteSlugStrict(request->path + 12, slug, sizeof(slug))) {
       SetError(response, 400, "Invalid page slug");
       return;
     }
@@ -4222,11 +4252,8 @@ void HandleRequest(sqlite3* db,
 
   if (std::strcmp(request->method, "POST") == 0 &&
       std::strncmp(request->path, "/images/upload/", 15) == 0) {
-    char decoded[MAX_PATH];
-    (void)UrlDecode(decoded, sizeof(decoded), request->path + 15,
-                    std::strlen(request->path + 15));
     char slug[MAX_SLUG];
-    if (!Slugify(decoded, slug, sizeof(slug)) || !IsSafeSlug(slug)) {
+    if (!DecodeRouteSlugStrict(request->path + 15, slug, sizeof(slug))) {
       SetError(response, 400, "Invalid page slug");
       return;
     }
@@ -4288,11 +4315,8 @@ void HandleRequest(sqlite3* db,
       return;
     }
 
-    char decodedSlug[MAX_PATH];
-    (void)UrlDecode(decodedSlug, sizeof(decodedSlug), slash + 1U,
-                    std::strlen(slash + 1U));
     char slug[MAX_SLUG];
-    if (!Slugify(decodedSlug, slug, sizeof(slug)) || !IsSafeSlug(slug)) {
+    if (!DecodeRouteSlugStrict(slash + 1U, slug, sizeof(slug))) {
       SetError(response, 400, "Invalid page slug");
       return;
     }
@@ -4316,11 +4340,8 @@ void HandleRequest(sqlite3* db,
 
   if (std::strcmp(request->method, "GET") == 0 &&
       std::strncmp(request->path, "/page/", 6) == 0) {
-    char decoded[MAX_PATH];
-    (void)UrlDecode(decoded, sizeof(decoded), request->path + 6,
-                    std::strlen(request->path + 6));
     char slug[MAX_SLUG];
-    if (!Slugify(decoded, slug, sizeof(slug)) || !IsSafeSlug(slug)) {
+    if (!DecodeRouteSlugStrict(request->path + 6, slug, sizeof(slug))) {
       SetError(response, 400, "Invalid page slug");
       return;
     }
@@ -4483,7 +4504,12 @@ ArgParseResult ParseArgs(int argc, char** argv, Config* config) {
         return ARG_PARSE_ERROR;
       }
     } else if (std::strcmp(arg, "--port") == 0) {
-      config->port = std::atoi(value);
+      int parsedPort = 0;
+      if (!ParsePositiveIntStrict(value, &parsedPort)) {
+        std::fprintf(stderr, "Invalid port\n");
+        return ARG_PARSE_ERROR;
+      }
+      config->port = parsedPort;
       if (config->port <= 0 || config->port > 65535) {
         std::fprintf(stderr, "Invalid port\n");
         return ARG_PARSE_ERROR;
@@ -4499,8 +4525,13 @@ ArgParseResult ParseArgs(int argc, char** argv, Config* config) {
         return ARG_PARSE_ERROR;
       }
     } else if (std::strcmp(arg, "--max-body-bytes") == 0) {
-      config->maxBodyBytes =
-          static_cast<size_t>(std::strtoull(value, nullptr, 10));
+      size_t parsedMaxBody = 0U;
+      if (!ParseUnsignedSizeStrict(value, &parsedMaxBody)) {
+        std::fprintf(stderr, "max-body-bytes must be 1..%zu\n",
+                     static_cast<size_t>(MAX_BODY_BYTES));
+        return ARG_PARSE_ERROR;
+      }
+      config->maxBodyBytes = parsedMaxBody;
       if (config->maxBodyBytes == 0U || config->maxBodyBytes > MAX_BODY_BYTES) {
         std::fprintf(stderr, "max-body-bytes must be 1..%zu\n",
                      static_cast<size_t>(MAX_BODY_BYTES));
@@ -4594,6 +4625,11 @@ int main(int argc, char** argv) {
     const int clientFd = accept(
         serverFd, reinterpret_cast<struct sockaddr*>(&clientAddr), &clientLen);
     if (clientFd < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      // Prevent tight-loop CPU burn if accept() is failing persistently.
+      (void)usleep(10000U);
       continue;
     }
 
