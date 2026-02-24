@@ -90,6 +90,19 @@ docker volume create mswiki-data
 docker run --rm --platform linux/amd64 -p 8080:8080 -v mswiki-data:/data mswiki:amd64
 ```
 
+Build and run the fuzzing image:
+
+```sh
+docker build --target fuzz -t mswiki:fuzz .
+docker run --rm mswiki:fuzz
+```
+
+To keep and reuse a corpus from the host:
+
+```sh
+mkdir -p fuzz-corpus/http_request
+docker run --rm -v "$PWD/fuzz-corpus:/corpus" mswiki:fuzz
+```
 Bind mounts from the host can still be used, but on macOS they may require additional ACL/ownership setup for uid/gid `65532`.
 
 If the container exits immediately, inspect logs:
