@@ -4,6 +4,7 @@
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <cerrno>
 #include <csignal>
@@ -19,6 +20,7 @@ namespace {
 
 static const int DEFAULT_PORT = 8080;
 static const int LISTEN_BACKLOG = 16;
+static const int CLIENT_SOCKET_TIMEOUT_SEC = 15;
 static const size_t MAX_HEADERS = 40;
 static const size_t MAX_HEADER_KEY = 64;
 static const size_t MAX_HEADER_VALUE = 512;
@@ -56,6 +58,7 @@ typedef struct {
 
 typedef struct {
   char method[MAX_METHOD];
+  char version[16];
   char target[MAX_TARGET];
   char path[MAX_PATH];
   char query[MAX_PATH];
@@ -153,21 +156,47 @@ bool ParseFormField(const HttpRequest* request,
                     size_t outSize);
 void ParseMultipartImage(const HttpRequest* request, MultipartImage* image);
 bool ParseRequestLine(const char* line, HttpRequest* request);
+bool ParseHttpRequest(unsigned char* raw,
+                      size_t rawLen,
+                      HttpRequest* request,
+                      const unsigned char** bodyStart,
+                      size_t* bodyOffset);
+bool ReadRequestFromSocket(int clientFd,
+                           size_t maxBodyBytes,
+                           unsigned char* out,
+                           size_t* outLen,
+                           bool* tooLarge);
 const char* DetectImageMimeFromData(const unsigned char* data, size_t len);
 void HandleRequest(sqlite3* db,
                    const Config* config,
                    const HttpRequest* request,
                    HttpResponse* response);
 
+/**
+ * Purpose: Handle termination signals by requesting a clean server shutdown.
+ * Inputs: Signal number is ignored because shutdown behavior is identical.
+ * Outputs: No return value; sets global run flag to 0.
+ */
 void SignalHandler(int) {
   gKeepRunning = 0;
 }
 
+/**
+ * Purpose: Reset a TextBuffer to an empty C string.
+ * Inputs: `buffer` must be non-null and writable.
+ * Outputs: No return value; length is set to 0 and data[0] becomes '\\0'.
+ */
 void BufferReset(TextBuffer* buffer) {
   buffer->length = 0;
   buffer->data[0] = '\0';
 }
 
+/**
+ * Purpose: Append raw bytes to a TextBuffer while preserving null termination.
+ * Inputs: `buffer` writable destination; `text` source bytes; `len` byte count.
+ * Outputs: Returns true on success; false if append would exceed buffer
+ * capacity.
+ */
 bool BufferAppendBytes(TextBuffer* buffer, const char* text, size_t len) {
   if (buffer->length + len + 1U > sizeof(buffer->data)) {
     return false;
@@ -178,10 +207,20 @@ bool BufferAppendBytes(TextBuffer* buffer, const char* text, size_t len) {
   return true;
 }
 
+/**
+ * Purpose: Append a null-terminated string to a TextBuffer.
+ * Inputs: `buffer` writable destination; `text` valid C string.
+ * Outputs: Returns true if appended; false on insufficient remaining capacity.
+ */
 bool BufferAppend(TextBuffer* buffer, const char* text) {
   return BufferAppendBytes(buffer, text, std::strlen(text));
 }
 
+/**
+ * Purpose: Append one character to a TextBuffer.
+ * Inputs: `buffer` writable destination; `ch` character to append.
+ * Outputs: Returns true on success; false if buffer is full.
+ */
 bool BufferAppendChar(TextBuffer* buffer, char ch) {
   if (buffer->length + 2U > sizeof(buffer->data)) {
     return false;
@@ -192,6 +231,12 @@ bool BufferAppendChar(TextBuffer* buffer, char ch) {
   return true;
 }
 
+/**
+ * Purpose: Append formatted text to a TextBuffer via `vsnprintf`.
+ * Inputs: `buffer` writable destination; `format` and varargs formatting
+ * inputs. Outputs: Returns true if all formatted bytes fit; false on
+ * encoding/overflow.
+ */
 bool BufferAppendFormat(TextBuffer* buffer, const char* format, ...) {
   va_list args;
   va_start(args, format);
@@ -209,6 +254,12 @@ bool BufferAppendFormat(TextBuffer* buffer, const char* format, ...) {
   return true;
 }
 
+/**
+ * Purpose: Append HTML-escaped text into a TextBuffer.
+ * Inputs: `buffer` writable destination; `text` source bytes; `len` byte count.
+ * Outputs: Returns true if fully escaped and appended; false on capacity
+ * overflow.
+ */
 bool BufferAppendEscaped(TextBuffer* buffer, const char* text, size_t len) {
   for (size_t i = 0; i < len; i++) {
     const char ch = text[i];
@@ -241,6 +292,12 @@ bool BufferAppendEscaped(TextBuffer* buffer, const char* text, size_t len) {
   return true;
 }
 
+/**
+ * Purpose: Convert one ASCII uppercase letter to lowercase.
+ * Inputs: `ch` integer character value.
+ * Outputs: Returns lowercase value for 'A'..'Z', otherwise returns `ch`
+ * unchanged.
+ */
 int ToLowerAscii(int ch) {
   if (ch >= 'A' && ch <= 'Z') {
     return ch - 'A' + 'a';
@@ -248,6 +305,12 @@ int ToLowerAscii(int ch) {
   return ch;
 }
 
+/**
+ * Purpose: Parse a base-10 unsigned integer with strict full-string validation.
+ * Inputs: `text` digits-only C string; `out` writable result pointer.
+ * Outputs: Returns true and writes parsed value on success; false on empty,
+ * non-digit, overflow, or invalid input.
+ */
 bool ParseUnsignedSizeStrict(const char* text, size_t* out) {
   if (text == nullptr || text[0] == '\0') {
     return false;
@@ -269,6 +332,11 @@ bool ParseUnsignedSizeStrict(const char* text, size_t* out) {
   return true;
 }
 
+/**
+ * Purpose: Parse a strictly positive signed integer without suffix garbage.
+ * Inputs: `text` digits-only C string; `out` writable result pointer.
+ * Outputs: Returns true and writes value in [1, INT32_MAX]; false otherwise.
+ */
 bool ParsePositiveIntStrict(const char* text, int* out) {
   size_t value = 0U;
   if (!ParseUnsignedSizeStrict(text, &value)) {
@@ -281,6 +349,11 @@ bool ParsePositiveIntStrict(const char* text, int* out) {
   return true;
 }
 
+/**
+ * Purpose: Lowercase a mutable ASCII string in place.
+ * Inputs: `text` non-null writable C string.
+ * Outputs: No return value; `text` is modified in place.
+ */
 void LowerString(char* text) {
   const size_t len = std::strlen(text);
   for (size_t i = 0; i < len; i++) {
@@ -288,6 +361,11 @@ void LowerString(char* text) {
   }
 }
 
+/**
+ * Purpose: Remove leading and trailing ASCII whitespace in place.
+ * Inputs: `text` non-null writable C string.
+ * Outputs: No return value; trimmed string remains in `text`.
+ */
 void TrimInPlace(char* text) {
   size_t start = 0;
   size_t len = std::strlen(text);
@@ -308,6 +386,12 @@ void TrimInPlace(char* text) {
   text[end - start] = '\0';
 }
 
+/**
+ * Purpose: Safely copy one C string into a fixed-size destination.
+ * Inputs: `dst` writable buffer; `dstSize` capacity; `src` null-terminated
+ * input. Outputs: Returns true when copy fits including terminator; false on
+ * overflow/zero capacity.
+ */
 bool CopyString(char* dst, size_t dstSize, const char* src) {
   if (dstSize == 0U) {
     return false;
@@ -320,6 +404,12 @@ bool CopyString(char* dst, size_t dstSize, const char* src) {
   return true;
 }
 
+/**
+ * Purpose: Decode percent-encoded URL text and '+' spaces.
+ * Inputs: `out` writable buffer with `outSize`; `in` encoded bytes and `inLen`.
+ * Outputs: Returns decoded byte count; `out` is always null-terminated if
+ * outSize > 0.
+ */
 size_t UrlDecode(char* out, size_t outSize, const char* in, size_t inLen) {
   size_t outLen = 0;
   for (size_t i = 0; i < inLen; i++) {
@@ -344,6 +434,12 @@ size_t UrlDecode(char* out, size_t outSize, const char* in, size_t inLen) {
   return outLen;
 }
 
+/**
+ * Purpose: Encode a string for URL-safe usage while preserving common safe
+ * characters. Inputs: `in` source C string; `out` destination buffer; `outSize`
+ * capacity. Outputs: Returns true on full encode; false if destination capacity
+ * is insufficient.
+ */
 bool UrlEncode(const char* in, char* out, size_t outSize) {
   static const char HEX[] = "0123456789ABCDEF";
   size_t outLen = 0;
@@ -374,6 +470,12 @@ bool UrlEncode(const char* in, char* out, size_t outSize) {
   return true;
 }
 
+/**
+ * Purpose: Convert free-form title text into a normalized page slug.
+ * Inputs: `input` source C string; `slug` output buffer; `slugSize` capacity.
+ * Outputs: Returns true and writes a lowercase slug; may emit "untitled"
+ * fallback. Returns false when output capacity is insufficient.
+ */
 bool Slugify(const char* input, char* slug, size_t slugSize) {
   size_t slugLen = 0;
   bool prevSep = false;
@@ -431,6 +533,12 @@ bool Slugify(const char* input, char* slug, size_t slugSize) {
   return true;
 }
 
+/**
+ * Purpose: Validate a slug against allowed wiki path character rules.
+ * Inputs: `slug` null-terminated candidate string.
+ * Outputs: Returns true when slug is non-empty, contains no "..", and only
+ * allowed chars.
+ */
 bool IsSafeSlug(const char* slug) {
   if (slug[0] == '\0') {
     return false;
@@ -451,6 +559,11 @@ bool IsSafeSlug(const char* slug) {
   return true;
 }
 
+/**
+ * Purpose: Format current UTC time as an ISO-8601 timestamp.
+ * Inputs: `out` writable character buffer; `outSize` capacity.
+ * Outputs: No return value; writes timestamp such as `2026-02-24T15:04:05Z`.
+ */
 void NowIso8601(char* out, size_t outSize) {
   const std::time_t now = std::time(nullptr);
   struct tm tmUtc;
@@ -463,6 +576,11 @@ void NowIso8601(char* out, size_t outSize) {
   (void)std::strftime(out, outSize, "%Y-%m-%dT%H:%M:%SZ", &tmUtc);
 }
 
+/**
+ * Purpose: Map HTTP status code to a reason phrase string.
+ * Inputs: `status` numeric HTTP status value.
+ * Outputs: Returns static reason phrase pointer (never null).
+ */
 const char* StatusText(int status) {
   if (status == 200) {
     return "OK";
@@ -488,6 +606,12 @@ const char* StatusText(int status) {
   return "Unknown";
 }
 
+/**
+ * Purpose: Populate an HttpResponse with status, content type, and body.
+ * Inputs: response destination pointer; status code; contentType string;
+ * body pointer; bodyLen in bytes.
+ * Outputs: No return value; response fields are fully overwritten.
+ */
 void SetResponse(HttpResponse* response,
                  int status,
                  const char* contentType,
@@ -502,6 +626,12 @@ void SetResponse(HttpResponse* response,
   response->hasLocation = false;
 }
 
+/**
+ * Purpose: Copy a textual body into stable storage before assigning response.
+ * Inputs: response destination pointer; status/content type; body string and
+ * byte length (must fit text response buffer).
+ * Outputs: true when copied and assigned; false on size overflow.
+ */
 bool SetResponseCopy(HttpResponse* response,
                      int status,
                      const char* contentType,
@@ -517,6 +647,11 @@ bool SetResponseCopy(HttpResponse* response,
   return true;
 }
 
+/**
+ * Purpose: Build a 302 redirect response with a `Location` header value.
+ * Inputs: `response` writable output object; `location` destination URL/path.
+ * Outputs: No return value; `response` is populated as a redirect.
+ */
 void SetRedirect(HttpResponse* response, const char* location) {
   static const char BODY[] = "redirect";
   SetResponse(response, 302, "text/plain; charset=utf-8",
@@ -536,6 +671,11 @@ typedef struct {
   int failed;
 } SelfTestState;
 
+/**
+ * Purpose: Record one self-test assertion result and report failures.
+ * Inputs: `state` writable counters; `condition` assertion result; `name` test
+ * label. Outputs: No return value; increments `passed` or `failed`.
+ */
 void SelfTestExpect(SelfTestState* state, bool condition, const char* name) {
   if (condition) {
     state->passed += 1;
@@ -545,6 +685,28 @@ void SelfTestExpect(SelfTestState* state, bool condition, const char* name) {
   }
 }
 
+/**
+ * Purpose: Write an entire byte range to a file descriptor.
+ * Inputs: `fd` writable descriptor; `data` source bytes; `len` byte count.
+ * Outputs: Returns true when all bytes are written; false on write failure.
+ */
+bool WriteAllFd(int fd, const unsigned char* data, size_t len) {
+  size_t sent = 0U;
+  while (sent < len) {
+    const ssize_t n = write(fd, data + sent, len - sent);
+    if (n <= 0) {
+      return false;
+    }
+    sent += static_cast<size_t>(n);
+  }
+  return true;
+}
+
+/**
+ * Purpose: Execute unit-level tests for slug, URL codec, and integer parsing
+ * helpers. Inputs: `state` writable aggregate test counters. Outputs: No return
+ * value; appends pass/fail results into `state`.
+ */
 void SelfTestSlugAndCodec(SelfTestState* state) {
   char slug[MAX_SLUG];
   SelfTestExpect(state,
@@ -575,6 +737,11 @@ void SelfTestSlugAndCodec(SelfTestState* state) {
                  "ParsePositiveIntStrict rejects suffix");
 }
 
+/**
+ * Purpose: Verify markdown rendering, wiki-link extraction, footnotes, and MIME
+ * sniffing. Inputs: `state` writable aggregate test counters. Outputs: No
+ * return value; appends pass/fail results into `state`.
+ */
 void SelfTestLinksAndMarkdown(SelfTestState* state) {
   char links[8][MAX_SLUG];
   size_t linkCount = 0;
@@ -618,6 +785,11 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
                  "DetectImageMimeFromData png");
 }
 
+/**
+ * Purpose: Validate URL form parsing and multipart image parsing behavior.
+ * Inputs: `state` writable aggregate test counters.
+ * Outputs: No return value; appends pass/fail results into `state`.
+ */
 void SelfTestFormAndMultipart(SelfTestState* state) {
   HttpRequest request;
   (void)std::memset(&request, 0, sizeof(request));
@@ -665,6 +837,11 @@ void SelfTestFormAndMultipart(SelfTestState* state) {
                  "ParseMultipartImage payload");
 }
 
+/**
+ * Purpose: Exercise SQLite CRUD flow for pages, backlinks, and image lifecycle.
+ * Inputs: `state` writable aggregate test counters.
+ * Outputs: No return value; appends pass/fail results into `state`.
+ */
 void SelfTestDatabase(SelfTestState* state) {
   char dbPath[128];
   (void)std::snprintf(dbPath, sizeof(dbPath), "/tmp/mswiki-selftest-%d.db",
@@ -743,6 +920,11 @@ void SelfTestDatabase(SelfTestState* state) {
   (void)unlink(dbPath);
 }
 
+/**
+ * Purpose: Validate handler routing and HTTP request parser guardrails.
+ * Inputs: `state` writable aggregate test counters.
+ * Outputs: No return value; appends pass/fail results into `state`.
+ */
 void SelfTestHttpHandler(SelfTestState* state) {
   sqlite3* db = nullptr;
   char err[256];
@@ -789,9 +971,132 @@ void SelfTestHttpHandler(SelfTestState* state) {
   SelfTestExpect(state, ParseRequestLine("GET / HTTP/1.1", &parsedRequest),
                  "ParseRequestLine accepts HTTP/1.1");
 
+  unsigned char rawNoHost[] = "GET / HTTP/1.1\r\nUser-Agent: x\r\n\r\n";
+  const unsigned char* bodyStart = nullptr;
+  size_t bodyOffset = 0U;
+  SelfTestExpect(state,
+                 !ParseHttpRequest(rawNoHost, sizeof(rawNoHost) - 1U,
+                                   &parsedRequest, &bodyStart, &bodyOffset),
+                 "ParseHttpRequest rejects HTTP/1.1 without host");
+
+  unsigned char rawWithHost[] = "GET / HTTP/1.1\r\nHost: wiki.local\r\n\r\n";
+  SelfTestExpect(state,
+                 ParseHttpRequest(rawWithHost, sizeof(rawWithHost) - 1U,
+                                  &parsedRequest, &bodyStart, &bodyOffset),
+                 "ParseHttpRequest accepts HTTP/1.1 with host");
+
+  HttpRequest badImageIdRequest;
+  HttpResponse badImageIdResponse;
+  (void)std::memset(&badImageIdRequest, 0, sizeof(badImageIdRequest));
+  (void)CopyString(badImageIdRequest.method, sizeof(badImageIdRequest.method),
+                   "GET");
+  (void)CopyString(badImageIdRequest.path, sizeof(badImageIdRequest.path),
+                   "/image/1abc");
+  HandleRequest(db, &config, &badImageIdRequest, &badImageIdResponse);
+  SelfTestExpect(state, badImageIdResponse.status == 400,
+                 "HandleRequest rejects /image suffix garbage");
+
+  HttpRequest badDeleteIdRequest;
+  HttpResponse badDeleteIdResponse;
+  (void)std::memset(&badDeleteIdRequest, 0, sizeof(badDeleteIdRequest));
+  (void)CopyString(badDeleteIdRequest.method, sizeof(badDeleteIdRequest.method),
+                   "POST");
+  (void)CopyString(badDeleteIdRequest.path, sizeof(badDeleteIdRequest.path),
+                   "/images/delete/1abc/home");
+  HandleRequest(db, &config, &badDeleteIdRequest, &badDeleteIdResponse);
+  SelfTestExpect(state, badDeleteIdResponse.status == 400,
+                 "HandleRequest rejects /images/delete suffix garbage");
+
   (void)sqlite3_close(db);
 }
 
+/**
+ * Purpose: Verify socket-level request framing checks with realistic read
+ * paths. Inputs: `state` writable aggregate test counters. Outputs: No return
+ * value; appends pass/fail results into `state`.
+ */
+void SelfTestSocketRequestValidation(SelfTestState* state) {
+  struct {
+    const char* name;
+    const char* raw;
+    bool expectSuccess;
+    bool expectTooLarge;
+  } cases[] = {
+      {"GET no content-length allowed",
+       "GET / HTTP/1.1\r\nHost: wiki.local\r\n\r\n", true, false},
+      {"POST requires content-length",
+       "POST /save/home HTTP/1.1\r\nHost: wiki.local\r\n\r\n"
+       "title=x&markdown=y",
+       false, false},
+      {"Transfer-Encoding rejected",
+       "POST /save/home HTTP/1.1\r\nHost: wiki.local\r\nTransfer-Encoding: "
+       "chunked\r\nContent-Length: 4\r\n\r\n"
+       "test",
+       false, false},
+      {"Duplicate mismatched content-length rejected",
+       "POST /save/home HTTP/1.1\r\nHost: wiki.local\r\nContent-Length: 4\r\n"
+       "Content-Length: 7\r\n\r\n"
+       "test",
+       false, false},
+      {"Duplicate matching content-length allowed",
+       "POST /save/home HTTP/1.1\r\nHost: wiki.local\r\nContent-Length: 4\r\n"
+       "Content-Length: 4\r\n\r\n"
+       "test",
+       true, false},
+      {"Too large content-length flagged",
+       "POST /save/home HTTP/1.1\r\nHost: wiki.local\r\nContent-Length: "
+       "10485761\r\n\r\n",
+       false, true},
+  };
+
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    int fds[2] = {-1, -1};
+    const int sp = socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+    if (sp != 0) {
+      SelfTestExpect(state, false, cases[i].name);
+      continue;
+    }
+
+    const unsigned char* raw =
+        reinterpret_cast<const unsigned char*>(cases[i].raw);
+    const size_t rawLen = std::strlen(cases[i].raw);
+    const bool writeOk = WriteAllFd(fds[0], raw, rawLen);
+    (void)shutdown(fds[0], SHUT_WR);
+    if (!writeOk) {
+      (void)close(fds[0]);
+      (void)close(fds[1]);
+      SelfTestExpect(state, false, cases[i].name);
+      continue;
+    }
+
+    unsigned char* scratch =
+        reinterpret_cast<unsigned char*>(std::malloc(MAX_REQUEST_BYTES));
+    if (scratch == nullptr) {
+      (void)close(fds[0]);
+      (void)close(fds[1]);
+      SelfTestExpect(state, false, cases[i].name);
+      continue;
+    }
+
+    size_t outLen = 0U;
+    bool tooLarge = false;
+    const bool ok = ReadRequestFromSocket(fds[1], MAX_BODY_BYTES, scratch,
+                                          &outLen, &tooLarge);
+    std::free(scratch);
+    (void)close(fds[0]);
+    (void)close(fds[1]);
+
+    const bool pass =
+        (ok == cases[i].expectSuccess) && (tooLarge == cases[i].expectTooLarge);
+    SelfTestExpect(state, pass, cases[i].name);
+  }
+}
+
+/**
+ * Purpose: Run full built-in self-test suite and print aggregate result.
+ * Inputs: No function arguments.
+ * Outputs: Returns 0 when all tests pass; 1 when any test fails.
+ */
 int RunSelfTests() {
   SelfTestState state;
   state.passed = 0;
@@ -802,12 +1107,19 @@ int RunSelfTests() {
   SelfTestFormAndMultipart(&state);
   SelfTestDatabase(&state);
   SelfTestHttpHandler(&state);
+  SelfTestSocketRequestValidation(&state);
 
   std::printf("Self-test results: passed=%d failed=%d\n", state.passed,
               state.failed);
   return (state.failed == 0) ? 0 : 1;
 }
 
+/**
+ * Purpose: Populate response as plain-text error with bounded body copy.
+ * Inputs: `response` writable output; `status` HTTP code; `message` text body.
+ * Outputs: No return value; `response` contains error body or fallback internal
+ * error.
+ */
 void SetError(HttpResponse* response, int status, const char* message) {
   const size_t len = std::strlen(message);
   if (len >= sizeof(gResponseBuffer)) {
@@ -820,6 +1132,12 @@ void SetError(HttpResponse* response, int status, const char* message) {
               len);
 }
 
+/**
+ * Purpose: Lookup a normalized HTTP header value by lowercase key.
+ * Inputs: `request` parsed request with header list; `key` lowercase header
+ * name. Outputs: Returns pointer to value inside request storage or null when
+ * absent.
+ */
 const char* FindHeader(const HttpRequest* request, const char* key) {
   for (size_t i = 0; i < request->headerCount; i++) {
     if (std::strcmp(request->headers[i].key, key) == 0) {
@@ -829,15 +1147,20 @@ const char* FindHeader(const HttpRequest* request, const char* key) {
   return nullptr;
 }
 
+/**
+ * Purpose: Parse HTTP request line into method, target, version, path, and
+ * query. Inputs: `line` request-line C string; `request` writable parsed
+ * output. Outputs: Returns true for valid HTTP/1.0 or HTTP/1.1 syntax; false
+ * otherwise.
+ */
 bool ParseRequestLine(const char* line, HttpRequest* request) {
-  char version[16];
   int matched = std::sscanf(line, "%7s %1023s %15s", request->method,
-                            request->target, version);
+                            request->target, request->version);
   if (matched != 3) {
     return false;
   }
-  if (std::strcmp(version, "HTTP/1.1") != 0 &&
-      std::strcmp(version, "HTTP/1.0") != 0) {
+  if (std::strcmp(request->version, "HTTP/1.1") != 0 &&
+      std::strcmp(request->version, "HTTP/1.0") != 0) {
     return false;
   }
 
@@ -863,6 +1186,12 @@ bool ParseRequestLine(const char* line, HttpRequest* request) {
   return true;
 }
 
+/**
+ * Purpose: Parse a complete HTTP request buffer into HttpRequest fields.
+ * Inputs: raw mutable request bytes (header bytes are modified in place),
+ * rawLen total bytes, request/body output pointers.
+ * Outputs: true on successful parse; false on malformed request framing.
+ */
 bool ParseHttpRequest(unsigned char* raw,
                       size_t rawLen,
                       HttpRequest* request,
@@ -898,10 +1227,9 @@ bool ParseHttpRequest(unsigned char* raw,
   cursor = lineEnd + 2;
   while (*cursor != '\0') {
     lineEnd = std::strstr(cursor, "\r\n");
-    if (lineEnd == nullptr) {
-      break;
+    if (lineEnd != nullptr) {
+      *lineEnd = '\0';
     }
-    *lineEnd = '\0';
 
     char* colon = std::strchr(cursor, ':');
     if (colon != nullptr) {
@@ -925,7 +1253,17 @@ bool ParseHttpRequest(unsigned char* raw,
       request->headerCount++;
     }
 
+    if (lineEnd == nullptr) {
+      break;
+    }
     cursor = lineEnd + 2;
+  }
+
+  if (std::strcmp(request->version, "HTTP/1.1") == 0) {
+    const char* host = FindHeader(request, "host");
+    if (host == nullptr || host[0] == '\0') {
+      return false;
+    }
   }
 
   *bodyOffset = headerEnd + 4U;
@@ -938,6 +1276,12 @@ bool ParseHttpRequest(unsigned char* raw,
   return true;
 }
 
+/**
+ * Purpose: Read one HTTP request from a socket with strict framing checks.
+ * Inputs: clientFd socket, maxBodyBytes limit, destination buffer and output
+ * pointers for bytes read and oversize flag.
+ * Outputs: true when a full request is read; false on framing/IO errors.
+ */
 bool ReadRequestFromSocket(int clientFd,
                            size_t maxBodyBytes,
                            unsigned char* out,
@@ -974,9 +1318,16 @@ bool ReadRequestFromSocket(int clientFd,
   }
 
   HttpRequest parsed;
+  unsigned char headerCopy[64U * 1024U + 4U];
+  const size_t headerBytes = headerEnd + 4U;
+  if (headerBytes > sizeof(headerCopy)) {
+    return false;
+  }
+  (void)std::memcpy(headerCopy, out, headerBytes);
   const unsigned char* bodyStart = nullptr;
   size_t bodyOffset = 0U;
-  if (!ParseHttpRequest(out, *outLen, &parsed, &bodyStart, &bodyOffset)) {
+  if (!ParseHttpRequest(headerCopy, headerBytes, &parsed, &bodyStart,
+                        &bodyOffset)) {
     return false;
   }
 
@@ -998,6 +1349,10 @@ bool ReadRequestFromSocket(int clientFd,
         return false;
       }
     }
+  }
+
+  if (std::strcmp(parsed.method, "POST") == 0 && !hasContentLength) {
+    return false;
   }
 
   if (hasContentLength && contentLength > maxBodyBytes) {
@@ -1025,6 +1380,12 @@ bool ReadRequestFromSocket(int clientFd,
   return true;
 }
 
+/**
+ * Purpose: Open SQLite database, enable pragmas, and apply schema migrations.
+ * Inputs: `db` output handle; `dbPath` file path; `err/errSize` error buffer.
+ * Outputs: Returns true with opened/migrated DB on success; false with error
+ * text set.
+ */
 bool DbOpen(sqlite3** db, const char* dbPath, char* err, size_t errSize) {
   const int openFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE;
   if (sqlite3_open_v2(dbPath, db, openFlags, nullptr) != SQLITE_OK) {
@@ -1077,6 +1438,11 @@ bool DbOpen(sqlite3** db, const char* dbPath, char* err, size_t errSize) {
   return true;
 }
 
+/**
+ * Purpose: Load a wiki page row by slug from SQLite.
+ * Inputs: db handle, slug key, page/found/error outputs.
+ * Outputs: true on query success (including not-found); false on DB errors.
+ */
 bool DbGetPage(sqlite3* db,
                const char* slug,
                PageRecord* page,
@@ -1145,6 +1511,11 @@ bool DbGetPage(sqlite3* db,
   return true;
 }
 
+/**
+ * Purpose: Extract and deduplicate wiki-link targets from markdown text.
+ * Inputs: markdown source, destination link array/counter, maxLinks capacity.
+ * Outputs: No return value; linkCount and links array are populated.
+ */
 void ExtractWikiLinks(const char* markdown,
                       char links[][MAX_SLUG],
                       size_t* linkCount,
@@ -1190,6 +1561,11 @@ void ExtractWikiLinks(const char* markdown,
   }
 }
 
+/**
+ * Purpose: Insert or update a page and refresh its outbound wiki-link index.
+ * Inputs: db handle, slug/title/markdown, error buffer.
+ * Outputs: true when transaction commits; false on validation/DB failures.
+ */
 bool DbUpsertPage(sqlite3* db,
                   const char* slug,
                   const char* title,
@@ -1293,6 +1669,12 @@ bool DbUpsertPage(sqlite3* db,
   return true;
 }
 
+/**
+ * Purpose: Query all pages and append HTML list items for index rendering.
+ * Inputs: `db` read handle; `html` writable buffer; `err/errSize` error buffer.
+ * Outputs: Returns true on success; false on DB/buffer errors with message in
+ * `err`.
+ */
 bool DbListPagesHtml(sqlite3* db, TextBuffer* html, char* err, size_t errSize) {
   sqlite3_stmt* stmt = nullptr;
   const char* sql = "SELECT slug, title FROM pages ORDER BY lower(title)";
@@ -1359,6 +1741,11 @@ bool DbListPagesHtml(sqlite3* db, TextBuffer* html, char* err, size_t errSize) {
   return true;
 }
 
+/**
+ * Purpose: Append backlink list HTML for pages linking to `slug`.
+ * Inputs: db handle, target slug, html output buffer, error buffer.
+ * Outputs: true on success; false on DB/query or buffer append failures.
+ */
 bool DbAppendBacklinksHtml(sqlite3* db,
                            const char* slug,
                            TextBuffer* html,
@@ -1438,6 +1825,11 @@ bool DbAppendBacklinksHtml(sqlite3* db,
   return true;
 }
 
+/**
+ * Purpose: Append page-image list HTML including markdown snippets/actions.
+ * Inputs: db handle, page slug, html output buffer, error buffer.
+ * Outputs: true on success; false on DB/query or buffer append failures.
+ */
 bool DbAppendImagesHtml(sqlite3* db,
                         const char* slug,
                         TextBuffer* html,
@@ -1529,6 +1921,12 @@ bool DbAppendImagesHtml(sqlite3* db,
   return true;
 }
 
+/**
+ * Purpose: Insert a new image blob and metadata row into SQLite.
+ * Inputs: db handle, page slug, filename, server-validated mime type, image
+ * bytes/length, output imageId, error buffer.
+ * Outputs: true on insert success; false on DB/constraint failures.
+ */
 bool DbInsertImage(sqlite3* db,
                    const char* pageSlug,
                    const char* filename,
@@ -1568,6 +1966,12 @@ bool DbInsertImage(sqlite3* db,
   return true;
 }
 
+/**
+ * Purpose: Load one image blob row by numeric image id.
+ * Inputs: db handle, image id, mime/data outputs, statement output, found flag,
+ * error buffer.
+ * Outputs: true on query success (including not-found); false on DB errors.
+ */
 bool DbGetImage(sqlite3* db,
                 int id,
                 char* mimeType,
@@ -1625,6 +2029,11 @@ bool DbGetImage(sqlite3* db,
   return true;
 }
 
+/**
+ * Purpose: Delete an image row scoped to the owning page slug.
+ * Inputs: db handle, image id, page slug, error buffer.
+ * Outputs: true on successful delete statement execution; false on DB errors.
+ */
 bool DbDeleteImage(sqlite3* db,
                    int id,
                    const char* pageSlug,
@@ -1647,6 +2056,11 @@ bool DbDeleteImage(sqlite3* db,
   return true;
 }
 
+/**
+ * Purpose: Locate the first occurrence of a byte subsequence.
+ * Inputs: haystack pointer/length, needle pointer/length.
+ * Outputs: Pointer to match start in haystack, or nullptr when not found.
+ */
 const unsigned char* FindBytes(const unsigned char* haystack,
                                size_t haystackLen,
                                const unsigned char* needle,
@@ -1662,6 +2076,13 @@ const unsigned char* FindBytes(const unsigned char* haystack,
   return nullptr;
 }
 
+/**
+ * Purpose: Parse multipart/form-data payload and extract first `image` part.
+ * Inputs: `request` parsed HTTP request with body and content-type header;
+ * `image` writable output structure.
+ * Outputs: No return value; sets `image->valid` and fills filename/mime/data
+ * pointers when an image part is found.
+ */
 void ParseMultipartImage(const HttpRequest* request, MultipartImage* image) {
   image->valid = false;
 
@@ -1842,6 +2263,12 @@ void ParseMultipartImage(const HttpRequest* request, MultipartImage* image) {
   }
 }
 
+/**
+ * Purpose: Parse one URL-encoded key-value field from request body.
+ * Inputs: `request` with form body; `key` field name; `out/outSize`
+ * destination. Outputs: Returns true and writes decoded value when key exists;
+ * false otherwise.
+ */
 bool ParseFormField(const HttpRequest* request,
                     const char* key,
                     char* out,
@@ -1882,6 +2309,12 @@ bool ParseFormField(const HttpRequest* request,
   return false;
 }
 
+/**
+ * Purpose: Parse a markdown footnote-definition line (`[^id]: text`).
+ * Inputs: line pointer/length and writable destination buffers for id/text.
+ * Outputs: Returns true when line is a valid definition and outputs are
+ * written.
+ */
 bool ParseFootnoteDefinitionLine(const char* line,
                                  size_t lineLen,
                                  char* id,
@@ -1918,6 +2351,11 @@ bool ParseFootnoteDefinitionLine(const char* line,
   return idLen > 0U;
 }
 
+/**
+ * Purpose: Find footnote identifier index in the collected footnote table.
+ * Inputs: `ids` array, `count` active entries, and target `id`.
+ * Outputs: Returns non-negative index when found; -1 when missing.
+ */
 int FindFootnoteIndex(const char ids[][MAX_FOOTNOTE_ID],
                       size_t count,
                       const char* id) {
@@ -1929,6 +2367,12 @@ int FindFootnoteIndex(const char ids[][MAX_FOOTNOTE_ID],
   return -1;
 }
 
+/**
+ * Purpose: Convert one markdown line into inline HTML with links/notes/images.
+ * Inputs: destination buffer, source text span, footnote metadata, and mutable
+ * numbering state.
+ * Outputs: Returns true on successful append; false on parse/buffer overflow.
+ */
 bool WriteInlineMarkdown(TextBuffer* out,
                          const char* text,
                          size_t len,
@@ -2144,6 +2588,13 @@ bool WriteInlineMarkdown(TextBuffer* out,
   return true;
 }
 
+/**
+ * Purpose: Render supported markdown subset to HTML, including wiki links,
+ * sidenotes, and margin images.
+ * Inputs: `markdown` source text and writable `html` output buffer.
+ * Outputs: Returns true when rendering succeeds; false on invalid/bounded
+ * output.
+ */
 bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
   const size_t len = std::strlen(markdown);
   char footnoteIds[MAX_FOOTNOTES][MAX_FOOTNOTE_ID];
@@ -2356,6 +2807,11 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
   return true;
 }
 
+/**
+ * Purpose: Infer MIME type from filename extension for static asset serving.
+ * Inputs: `filename` C string, typically asset path or uploaded filename.
+ * Outputs: Returns static MIME string; defaults to `application/octet-stream`.
+ */
 const char* DetectMimeType(const char* filename) {
   const char* dot = std::strrchr(filename, '.');
   if (dot == nullptr) {
@@ -2383,6 +2839,11 @@ const char* DetectMimeType(const char* filename) {
   return "application/octet-stream";
 }
 
+/**
+ * Purpose: Identify image MIME from binary signatures (magic bytes).
+ * Inputs: `data` pointer to file bytes and `len` byte count.
+ * Outputs: Returns known image MIME string or null when unknown/invalid.
+ */
 const char* DetectImageMimeFromData(const unsigned char* data, size_t len) {
   if (data == nullptr || len < 4U) {
     return nullptr;
@@ -2406,6 +2867,11 @@ const char* DetectImageMimeFromData(const unsigned char* data, size_t len) {
   return nullptr;
 }
 
+/**
+ * Purpose: Read a whole file into a bounded memory buffer.
+ * Inputs: `path` source file; `dst/dstSize` writable destination; `outLen`
+ * result. Outputs: Returns true on successful read; false on open/read failure.
+ */
 bool ReadFile(const char* path,
               unsigned char* dst,
               size_t dstSize,
@@ -2432,6 +2898,11 @@ bool ReadFile(const char* path,
   return true;
 }
 
+/**
+ * Purpose: Find first existing logo asset in configured assets directory.
+ * Inputs: `config` with optional assets path; `path/pathSize` writable output.
+ * Outputs: Returns true and writes file path when logo exists; false otherwise.
+ */
 bool FindLogo(const Config* config, char* path, size_t pathSize) {
   if (config->assetsPath[0] == '\0') {
     return false;
@@ -2453,6 +2924,11 @@ bool FindLogo(const Config* config, char* path, size_t pathSize) {
   return false;
 }
 
+/**
+ * Purpose: Build the common HTML page shell with header/nav around content.
+ * Inputs: config for branding assets, page title, content HTML, output buffer.
+ * Outputs: true on successful HTML construction; false on buffer overflow.
+ */
 bool BuildPageLayout(const Config* config,
                      const char* title,
                      const char* content,
@@ -2500,6 +2976,11 @@ bool BuildPageLayout(const Config* config,
   return true;
 }
 
+/**
+ * Purpose: Populate stylesheet buffer with built-in Tufte-inspired theme CSS.
+ * Inputs: `css` writable text buffer.
+ * Outputs: No return value; appends default stylesheet content to `css`.
+ */
 void BuildDefaultCss(TextBuffer* css) {
   (void)BufferAppend(
       css,
@@ -2573,6 +3054,11 @@ void BuildDefaultCss(TextBuffer* css) {
       "display:flex;flex-wrap:wrap;gap:8px;}nav a{margin-right:0;}}");
 }
 
+/**
+ * Purpose: Render the "all pages" listing document.
+ * Inputs: db handle, runtime config, output page buffer, error buffer.
+ * Outputs: true on success; false on query/render failures.
+ */
 bool BuildPagesHtml(sqlite3* db,
                     const Config* config,
                     TextBuffer* page,
@@ -2619,6 +3105,11 @@ bool BuildPagesHtml(sqlite3* db,
   return BuildPageLayout(config, "All Pages", content.data, page);
 }
 
+/**
+ * Purpose: Render the page editor form for create/update operations.
+ * Inputs: config, slug, current title/markdown values, output page buffer.
+ * Outputs: true on success; false when rendered content exceeds buffer limits.
+ */
 bool BuildEditHtml(const Config* config,
                    const char* slug,
                    const char* title,
@@ -2682,6 +3173,11 @@ bool BuildEditHtml(const Config* config,
   return BuildPageLayout(config, "Edit", content.data, page);
 }
 
+/**
+ * Purpose: Render placeholder page for a missing slug with create link.
+ * Inputs: config, missing slug, output page buffer.
+ * Outputs: true on success; false on buffer overflow while composing HTML.
+ */
 bool BuildMissingPageHtml(const Config* config,
                           const char* slug,
                           TextBuffer* page) {
@@ -2715,6 +3211,12 @@ bool BuildMissingPageHtml(const Config* config,
   return BuildPageLayout(config, "Missing Page", content.data, page);
 }
 
+/**
+ * Purpose: Render full page view including metadata, backlinks, and images.
+ * Inputs: db handle, config, loaded page record, output page buffer, error
+ * buffer.
+ * Outputs: true on success; false on markdown/db/render failures.
+ */
 bool BuildViewHtml(sqlite3* db,
                    const Config* config,
                    const PageRecord* pageRecord,
@@ -2824,6 +3326,11 @@ bool BuildViewHtml(sqlite3* db,
   return BuildPageLayout(config, pageRecord->title, content.data, page);
 }
 
+/**
+ * Purpose: Render the image upload form for a page slug.
+ * Inputs: config, slug, output page buffer.
+ * Outputs: true on success; false on buffer overflow.
+ */
 bool BuildImageUploadForm(const Config* config,
                           const char* slug,
                           TextBuffer* page) {
@@ -2867,6 +3374,11 @@ bool BuildImageUploadForm(const Config* config,
   return BuildPageLayout(config, "Upload Image", content.data, page);
 }
 
+/**
+ * Purpose: Render upload-success page showing markdown embed syntax.
+ * Inputs: config, page slug, original filename, image id, output page buffer.
+ * Outputs: true on success; false on buffer overflow while composing HTML.
+ */
 bool BuildImageUploadedPage(const Config* config,
                             const char* slug,
                             const char* filename,
@@ -2903,6 +3415,12 @@ bool BuildImageUploadedPage(const Config* config,
   return BuildPageLayout(config, "Image Uploaded", content.data, page);
 }
 
+/**
+ * Purpose: Build final stylesheet by combining defaults and optional custom
+ * file. Inputs: `config` runtime settings; `css` writable output buffer.
+ * Outputs: Returns true when style output is built; false only on buffer
+ * overflow.
+ */
 bool BuildStyleCss(const Config* config, TextBuffer* css) {
   BufferReset(css);
   BuildDefaultCss(css);
@@ -2933,6 +3451,11 @@ bool BuildStyleCss(const Config* config, TextBuffer* css) {
   return true;
 }
 
+/**
+ * Purpose: Execute routing and produce an HTTP response for one request.
+ * Inputs: db handle, runtime config, parsed request, response output pointer.
+ * Outputs: No return value; response is populated with status/body/headers.
+ */
 void HandleRequest(sqlite3* db,
                    const Config* config,
                    const HttpRequest* request,
@@ -3327,6 +3850,12 @@ void HandleRequest(sqlite3* db,
   SetError(response, 404, "Not found");
 }
 
+/**
+ * Purpose: Serialize and send HTTP response headers/body to client socket.
+ * Inputs: `clientFd` connected socket; `response` fully populated output
+ * object. Outputs: Returns true when full header and body are sent; false on
+ * socket error.
+ */
 bool SendResponse(int clientFd, const HttpResponse* response) {
   TextBuffer header;
   BufferReset(&header);
@@ -3378,6 +3907,11 @@ bool SendResponse(int clientFd, const HttpResponse* response) {
   return true;
 }
 
+/**
+ * Purpose: Print CLI usage/help text to stdout.
+ * Inputs: No function arguments.
+ * Outputs: No return value; writes usage lines to standard output.
+ */
 void PrintUsage() {
   std::printf("mswiki options:\n");
   std::printf(
@@ -3393,6 +3927,11 @@ void PrintUsage() {
   std::printf("  --help                     Show this help\n");
 }
 
+/**
+ * Purpose: Parse command-line arguments into runtime Config.
+ * Inputs: `argc/argv` process arguments and writable `config`.
+ * Outputs: Returns parse status enum (ok/help/error) and mutates `config`.
+ */
 ArgParseResult ParseArgs(int argc, char** argv, Config* config) {
   (void)CopyString(config->listenHost, sizeof(config->listenHost), "0.0.0.0");
   config->port = DEFAULT_PORT;
@@ -3463,6 +4002,11 @@ ArgParseResult ParseArgs(int argc, char** argv, Config* config) {
 
 }  // namespace
 
+/**
+ * Purpose: Program entrypoint that configures, runs, and shuts down the server.
+ * Inputs: Standard C `argc/argv` process arguments.
+ * Outputs: Returns process exit code (0 success, non-zero failure).
+ */
 int main(int argc, char** argv) {
   Config config;
   const ArgParseResult parseResult = ParseArgs(argc, argv, &config);
@@ -3534,6 +4078,14 @@ int main(int argc, char** argv) {
     if (clientFd < 0) {
       continue;
     }
+
+    struct timeval timeout;
+    timeout.tv_sec = CLIENT_SOCKET_TIMEOUT_SEC;
+    timeout.tv_usec = 0;
+    (void)setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                     sizeof(timeout));
+    (void)setsockopt(clientFd, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+                     sizeof(timeout));
 
     size_t reqLen = 0;
     bool tooLarge = false;
