@@ -2405,6 +2405,7 @@ void HandleRequest(sqlite3* db,
       return;
     }
     char err[256];
+    (void)CopyString(err, sizeof(err), "Failed to build search page");
     const char* queryForSearch =
         (feedback == nullptr && tokenCount > 0U) ? ftsQuery : nullptr;
     if (!BuildSearchHtml(db, arena, query, queryForSearch, tokens, tokenCount,

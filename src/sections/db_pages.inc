@@ -525,12 +525,13 @@ bool DbSearchPagesHtml(sqlite3* db,
   const char* sql =
       "SELECT p.slug, p.title, p.markdown, bm25(pages_fts, 5.0, 3.0, 1.0) AS rank "
       "FROM pages_fts JOIN pages p ON p.id = pages_fts.rowid "
-      "WHERE pages_fts MATCH ? ORDER BY rank LIMIT 20";
+      "WHERE pages_fts MATCH ? ORDER BY rank LIMIT ?2";
   if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     (void)std::snprintf(err, errSize, "search query preparation failed");
     return false;
   }
   (void)sqlite3_bind_text(stmt, 1, ftsQuery, -1, SQLITE_TRANSIENT);
+  (void)sqlite3_bind_int(stmt, 2, MAX_SEARCH_RESULTS);
 
   bool listOpen = false;
   bool done = false;
@@ -610,9 +611,6 @@ bool DbSearchPagesHtml(sqlite3* db,
     }
 
     *resultCount += 1;
-    if (*resultCount >= MAX_SEARCH_RESULTS) {
-      done = true;
-    }
   }
 
   if (listOpen) {
