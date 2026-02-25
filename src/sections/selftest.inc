@@ -761,8 +761,26 @@ void SelfTestHttpHandler(SelfTestState* state) {
   SelfTestExpect(
       state,
       std::strstr(reinterpret_cast<const char*>(response.body),
+                  "<html lang=\"en\">") != nullptr,
+      "Page layout sets HTML language");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "name=\"description\" content=\"mswiki is a lightweight "
+                  "markdown wiki for personal and small-team knowledge "
+                  "bases.\"") != nullptr,
+      "Page layout includes default meta description");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
                   "rel=\"icon\" href=\"data:image/svg+xml") != nullptr,
       "Page layout includes inline favicon");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "rel=\"preload\" href=\"/style.css\" as=\"style\"") !=
+          nullptr,
+      "Page layout preloads stylesheet");
   SelfTestExpect(
       state,
       std::strstr(reinterpret_cast<const char*>(response.body),
@@ -834,6 +852,32 @@ void SelfTestHttpHandler(SelfTestState* state) {
                   "Invalid search query. Please use plain text with at least 3 "
                   "characters.") != nullptr,
       "Search page reports invalid query encoding");
+
+  const bool createImageLoadPageOk = DbUpsertPage(
+      db, "imageload", "Image Load",
+      "![one](https://example.com/one.jpg)\n"
+      "![two](https://example.com/two.jpg)\n",
+      err, sizeof(err));
+  SelfTestExpect(state, createImageLoadPageOk,
+                 "DbUpsertPage image-loading behavior fixture");
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/page/imageload");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 200,
+                 "HandleRequest GET /page/imageload");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "<img src=\"https://example.com/one.jpg\" alt=\"one\"></a>") !=
+          nullptr,
+      "First rendered markdown image omits lazy-loading attribute");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "<img src=\"https://example.com/two.jpg\" alt=\"two\" "
+                  "loading=\"lazy\"></a>") != nullptr,
+      "Subsequent rendered markdown images remain lazy-loaded");
 
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");

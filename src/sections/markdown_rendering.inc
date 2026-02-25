@@ -165,7 +165,7 @@ bool IsDocumentLinkTarget(const char* url, size_t len) {
   }
   const size_t idLen = len - 10U;
   char idText[32];
-  if (idLen == 0U || idLen + 1U > sizeof(idText)) {
+  if (idLen + 1U > sizeof(idText)) {
     return false;
   }
   (void)std::memcpy(idText, url + 10U, idLen);

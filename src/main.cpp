@@ -1081,45 +1081,37 @@ bool HtmlAppendContentPretty(HtmlWriter* writer, const char* content) {
       left++;
     }
     const char* stripped = line + left;
-    size_t strippedLen = lineLen - left;
-    const bool isTagLine = (strippedLen > 0U && stripped[0] == '<');
-    const bool closesTextarea =
-        inTextarea && isTagLine && LineContainsToken(stripped, strippedLen, "</textarea>");
+    const bool hasStrippedContent = (left < lineLen);
+    const size_t strippedLen = hasStrippedContent ? (lineLen - left) : 0U;
+    const bool isTagLine = hasStrippedContent && stripped[0] == '<';
+    const bool closesTextarea = inTextarea && isTagLine &&
+                                LineContainsToken(stripped, strippedLen,
+                                                  "</textarea>");
     const bool closesScript =
-        inScript && isTagLine && LineContainsToken(stripped, strippedLen, "</script>");
+        inScript && isTagLine &&
+        LineContainsToken(stripped, strippedLen, "</script>");
+    const bool closesRawBlock = closesTextarea || closesScript;
+    const bool inRawBlock = inTextarea || inScript;
 
-    if ((closesTextarea || closesScript) && contentIndent > 0) {
+    if (closesRawBlock && contentIndent > 0) {
       contentIndent -= 1;
     }
 
-    if (!inTextarea && !inScript && isTagLine && strippedLen > 1U &&
-        stripped[1] == '/' && contentIndent > 0) {
+    if (!inRawBlock && isTagLine && strippedLen > 1U && stripped[1] == '/' &&
+        contentIndent > 0) {
       contentIndent -= 1;
     }
 
-    if (!inTextarea && !inScript && isTagLine) {
-      for (int i = 0; i < writer->indentLevel + contentIndent; i++) {
-        if (!BufferAppend(writer->out, "  ")) {
-          return false;
-        }
-      }
-    } else if (inScript && !closesScript) {
-      for (int i = 0; i < writer->indentLevel + contentIndent; i++) {
-        if (!BufferAppend(writer->out, "  ")) {
-          return false;
-        }
-      }
-    } else if (closesTextarea || closesScript) {
+    const bool shouldIndent = (!inRawBlock && isTagLine) ||
+                              (inScript && !closesScript) || closesRawBlock;
+    if (shouldIndent) {
       for (int i = 0; i < writer->indentLevel + contentIndent; i++) {
         if (!BufferAppend(writer->out, "  ")) {
           return false;
         }
       }
     }
-    if (!inTextarea && !inScript && isTagLine) {
-      line = stripped;
-      lineLen = strippedLen;
-    } else if (closesTextarea || closesScript) {
+    if ((!inRawBlock && isTagLine) || closesRawBlock) {
       line = stripped;
       lineLen = strippedLen;
     }
@@ -1130,7 +1122,7 @@ bool HtmlAppendContentPretty(HtmlWriter* writer, const char* content) {
       return false;
     }
 
-    if (!inTextarea && !inScript && isTagLine) {
+    if (!inRawBlock && isTagLine) {
       const bool isClosing = (lineLen > 1U && line[1] == '/');
       const bool hasInlineClose = LineContainsToken(line, lineLen, "</");
       const bool selfClosed =
@@ -1169,6 +1161,34 @@ bool HtmlAppendContentPretty(HtmlWriter* writer, const char* content) {
 }
 
 /*
+ * Remove the first `loading="lazy"` marker from rendered markdown HTML
+ * so the first in-content figure can be prioritized for LCP.
+ *
+ * Input: mutable HTML buffer produced by RenderMarkdownToHtml.
+ * Output: true on success (including when no lazy marker exists).
+ */
+bool DisableLazyLoadingForFirstImage(TextBuffer* html) {
+  if (html == nullptr || html->data == nullptr) {
+    return false;
+  }
+  static const char TOKEN[] = " loading=\"lazy\"";
+  const char* pos = std::strstr(html->data, TOKEN);
+  if (pos == nullptr) {
+    return true;
+  }
+  const size_t tokenLen = sizeof(TOKEN) - 1U;
+  const size_t index = static_cast<size_t>(pos - html->data);
+  if (index + tokenLen > html->length) {
+    return false;
+  }
+  const size_t tailOffset = index + tokenLen;
+  const size_t tailLen = html->length - tailOffset;
+  (void)std::memmove(html->data + index, html->data + tailOffset, tailLen + 1U);
+  html->length -= tokenLen;
+  return true;
+}
+
+/*
  * Build the common HTML page shell with brand, header search, and nav links
  * wrapped around page content.
  */
@@ -1184,7 +1204,7 @@ bool BuildPageLayout(const char* title,
   if (!HtmlLine(&writer, "<!doctype html>")) {
     return false;
   }
-  if (!HtmlOpen(&writer, "<html>")) {
+  if (!HtmlOpen(&writer, "<html lang=\"en\">")) {
     return false;
   }
   if (!HtmlOpen(&writer, "<head>")) {
@@ -1196,6 +1216,12 @@ bool BuildPageLayout(const char* title,
   if (!HtmlLine(&writer,
                 "<meta name=\"viewport\" "
                 "content=\"width=device-width,initial-scale=1\">")) {
+    return false;
+  }
+  if (!HtmlLine(
+          &writer,
+          "<meta name=\"description\" content=\"mswiki is a lightweight "
+          "markdown wiki for personal and small-team knowledge bases.\">")) {
     return false;
   }
   if (!HtmlWriteIndent(&writer)) {
@@ -1216,6 +1242,10 @@ bool BuildPageLayout(const char* title,
                 "2000/svg'%20viewBox='0%200%20"
                 "100%20100'%3E%3Ctext%20y='.9em'%20font-size='90'%3E%F0"
                 "%9F%90%B1%3C/text%3E%3C/svg%3E\">")) {
+    return false;
+  }
+  if (!HtmlLine(&writer,
+                "<link rel=\"preload\" href=\"/style.css\" as=\"style\">")) {
     return false;
   }
   if (!HtmlLine(&writer, "<link rel=\"stylesheet\" href=\"/style.css\">")) {
@@ -1651,7 +1681,6 @@ bool BuildSearchHtml(sqlite3* db,
     return false;
   }
 
-  bool queryExecutionFailed = false;
   if (feedback != nullptr && feedback[0] != '\0') {
     if (!BufferAppend(&content, "<p class=\"notice\">")) {
       return false;
@@ -1664,10 +1693,9 @@ bool BuildSearchHtml(sqlite3* db,
     }
   } else if (ftsQuery != nullptr && tokenCount > 0U) {
     int resultCount = 0;
-    if (!DbSearchPagesHtml(db, ftsQuery, tokens, tokenCount, &content,
-                           &resultCount, err, errSize)) {
-      queryExecutionFailed = true;
-    }
+    const bool queryExecutionFailed =
+        !DbSearchPagesHtml(db, ftsQuery, tokens, tokenCount, &content,
+                           &resultCount, err, errSize);
     if (queryExecutionFailed) {
       if (!BufferAppend(
               &content,
@@ -2008,6 +2036,10 @@ bool BuildViewHtml(sqlite3* db,
   }
   if (!RenderMarkdownToHtml(pageRecord->markdown, &markdownHtml)) {
     (void)std::snprintf(err, errSize, "markdown render overflow");
+    return false;
+  }
+  if (!DisableLazyLoadingForFirstImage(&markdownHtml)) {
+    (void)std::snprintf(err, errSize, "image loading attribute update failed");
     return false;
   }
 
