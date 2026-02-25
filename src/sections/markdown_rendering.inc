@@ -566,6 +566,35 @@ bool WriteInlineMarkdown(TextBuffer* out,
 }
 
 /*
+ * Close active list state, including nested sublist and parent list item.
+ */
+bool CloseListBlocks(TextBuffer* html,
+                     bool* inList,
+                     bool* inTopListItem,
+                     bool* inSublist) {
+  if (!*inList) {
+    return true;
+  }
+  if (*inSublist) {
+    if (!BufferAppend(html, "</ul>\n")) {
+      return false;
+    }
+    *inSublist = false;
+  }
+  if (*inTopListItem) {
+    if (!BufferAppend(html, "</li>\n")) {
+      return false;
+    }
+    *inTopListItem = false;
+  }
+  if (!BufferAppend(html, "</ul>\n")) {
+    return false;
+  }
+  *inList = false;
+  return true;
+}
+
+/*
  * Render supported markdown subset to HTML, including wiki links,
  * sidenotes, and margin images.
  * Parsing is strict for block markers: headings/lists/quotes/fences/footnote
@@ -612,6 +641,8 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
   bool inCodeBlock = false;
   bool codeBlockHasLine = false;
   bool inList = false;
+  bool inTopListItem = false;
+  bool inSublist = false;
   bool inBlockquote = false;
 
   while (lineStart <= len) {
@@ -639,11 +670,8 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
     }
 
     if (lineLen >= 3U && std::strncmp(line, "```", 3) == 0) {
-      if (inList) {
-        if (!BufferAppend(html, "</ul>\n")) {
-          return false;
-        }
-        inList = false;
+      if (!CloseListBlocks(html, &inList, &inTopListItem, &inSublist)) {
+        return false;
       }
       if (inBlockquote) {
         if (!BufferAppend(html, "</blockquote>\n")) {
@@ -674,11 +702,8 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
       }
       codeBlockHasLine = true;
     } else if (lineLen == 0U) {
-      if (inList) {
-        if (!BufferAppend(html, "</ul>\n")) {
-          return false;
-        }
-        inList = false;
+      if (!CloseListBlocks(html, &inList, &inTopListItem, &inSublist)) {
+        return false;
       }
       if (inBlockquote) {
         if (!BufferAppend(html, "</blockquote>\n")) {
@@ -700,6 +725,17 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
         }
         inList = true;
       }
+      if (inSublist) {
+        if (!BufferAppend(html, "</ul>\n")) {
+          return false;
+        }
+        inSublist = false;
+      }
+      if (inTopListItem) {
+        if (!BufferAppend(html, "</li>\n")) {
+          return false;
+        }
+      }
       if (!BufferAppend(html, "<li>")) {
         return false;
       }
@@ -708,15 +744,43 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
                                &nextFootnoteNumber)) {
         return false;
       }
-      if (!BufferAppend(html, "</li>\n")) {
-        return false;
-      }
-    } else if (lineLen > 2U && line[0] == '>' && line[1] == ' ') {
-      if (inList) {
-        if (!BufferAppend(html, "</ul>\n")) {
+      inTopListItem = true;
+    } else if (lineLen > 3U && line[0] == '-' && line[1] == '-' &&
+               line[2] == ' ') {
+      if (!inList || !inTopListItem) {
+        if (!BufferAppend(html, "<p>")) {
           return false;
         }
-        inList = false;
+        if (!WriteInlineMarkdown(html, lineRaw, lineLen, footnoteIds,
+                                 footnoteText, footnoteCount, footnoteOrder,
+                                 &nextFootnoteNumber)) {
+          return false;
+        }
+        if (!BufferAppend(html, "</p>\n")) {
+          return false;
+        }
+      } else {
+        if (!inSublist) {
+          if (!BufferAppend(html, "<ul>\n")) {
+            return false;
+          }
+          inSublist = true;
+        }
+        if (!BufferAppend(html, "<li>")) {
+          return false;
+        }
+        if (!WriteInlineMarkdown(html, line + 3, lineLen - 3U, footnoteIds,
+                                 footnoteText, footnoteCount, footnoteOrder,
+                                 &nextFootnoteNumber)) {
+          return false;
+        }
+        if (!BufferAppend(html, "</li>\n")) {
+          return false;
+        }
+      }
+    } else if (lineLen > 2U && line[0] == '>' && line[1] == ' ') {
+      if (!CloseListBlocks(html, &inList, &inTopListItem, &inSublist)) {
+        return false;
       }
       if (!inBlockquote) {
         if (!BufferAppend(html, "<blockquote>\n")) {
@@ -736,11 +800,8 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
         return false;
       }
     } else {
-      if (inList) {
-        if (!BufferAppend(html, "</ul>\n")) {
-          return false;
-        }
-        inList = false;
+      if (!CloseListBlocks(html, &inList, &inTopListItem, &inSublist)) {
+        return false;
       }
       if (inBlockquote) {
         if (!BufferAppend(html, "</blockquote>\n")) {
@@ -788,10 +849,8 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
     lineStart = lineEnd + 1U;
   }
 
-  if (inList) {
-    if (!BufferAppend(html, "</ul>\n")) {
-      return false;
-    }
+  if (!CloseListBlocks(html, &inList, &inTopListItem, &inSublist)) {
+    return false;
   }
   if (inCodeBlock) {
     if (!BufferAppend(html, "</code></pre>\n")) {

@@ -114,7 +114,9 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
       "> quoted line\n"
       "![Side Image](/image/7)\n"
       "[^n]: Footnote body.\n"
-      "* item\n",
+      "- parent item\n"
+      "-- child item\n"
+      "- item\n",
       &html);
   SelfTestExpect(state, rendered, "RenderMarkdownToHtml success");
   SelfTestExpect(state, std::strstr(html.data, "<h1>Title</h1>") != nullptr,
@@ -158,6 +160,12 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
       state,
       std::strstr(html.data, "<section class=\"panel footnotes\">") != nullptr,
       "Render footnotes section");
+  SelfTestExpect(state,
+                 std::strstr(html.data, "<li>parent item<ul>\n<li>child item</li>\n"
+                                        "</ul>\n</li>\n") != nullptr,
+                 "Render one-level nested list from -- marker");
+  SelfTestExpect(state, std::strstr(html.data, "<li>item</li>\n") != nullptr,
+                 "Render top-level list item after nested list");
 
   TextBuffer indentedHtml;
   if (!ArenaAllocTextBuffer(&arena, &indentedHtml, MAX_RESPONSE_BYTES)) {
