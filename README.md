@@ -42,6 +42,10 @@
 - Built-in self-test mode (`--self-test`)
 - Distroless nonroot runtime image (Docker)
 
+## Container Image
+
+- `ghcr.io/mtstanfield/mswiki:latest`
+
 ## Build
 
 ```sh
