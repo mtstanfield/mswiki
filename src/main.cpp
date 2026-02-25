@@ -323,8 +323,21 @@ bool BufferAppendFormat(TextBuffer* buffer, const char* format, ...) {
   va_list args;
   va_start(args, format);
   const size_t remaining = buffer->capacity - buffer->length;
+#if defined(__clang__)
+  // `BufferAppendFormat` intentionally accepts a runtime format pointer so it
+  // can wrap `printf`-style formatting for this project-wide text buffer API.
+  // With `-Weverything`, clang flags this forwarding call as
+  // `-Wformat-nonliteral` even when call sites use fixed format literals.
+  // Keep the suppression scoped to this one `vsnprintf` call so strict warning
+  // gates remain active for the rest of the codebase.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+#endif
   const int count =
       std::vsnprintf(buffer->data + buffer->length, remaining, format, args);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
   va_end(args);
   if (count < 0) {
     return false;

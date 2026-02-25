@@ -10,7 +10,43 @@ permissions:
   packages: write
 
 jobs:
+  quality-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang \
+            cmake \
+            cppcheck \
+            libsqlite3-dev \
+            ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DMSWIKI_WARNINGS_AS_ERRORS=ON \
+            -DMSWIKI_STRICT_CLANG=ON
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Run self-test
+        run: ./build/mswiki --self-test
+
+      - name: Run static analysis
+        run: cppcheck --enable=warning,style,performance,portability --std=c++11 --inline-suppr src
+
   docker:
+    needs: quality-gates
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

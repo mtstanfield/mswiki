@@ -3,14 +3,19 @@
 FROM debian:bookworm-slim AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    clang \
     cmake \
+    cppcheck \
     libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY . .
-RUN cmake -S . -B build -DMSWIKI_STATIC=ON
+RUN cmake -S . -B build -DMSWIKI_STATIC=ON -DCMAKE_CXX_COMPILER=clang++ -DMSWIKI_WARNINGS_AS_ERRORS=ON -DMSWIKI_STRICT_CLANG=ON
 RUN cmake --build build --config Release -j"$(nproc)"
+RUN ctest --test-dir build --output-on-failure
+RUN ./build/mswiki --self-test
+RUN cppcheck --enable=warning,style,performance,portability --std=c++11 --inline-suppr src
 RUN mkdir -p /runtime/data && chown -R 65532:65532 /runtime/data
 
 FROM debian:bookworm-slim AS fuzz

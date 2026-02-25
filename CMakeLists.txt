@@ -7,15 +7,38 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(MSWIKI_STATIC "Build a statically linked binary" OFF)
 option(MSWIKI_FUZZING "Build libFuzzer targets" OFF)
+option(MSWIKI_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
+option(MSWIKI_STRICT_CLANG "Enable strict clang warning profile" ON)
 
 add_executable(mswiki src/main.cpp)
 
-target_compile_options(mswiki PRIVATE
+set(MSWIKI_WARNING_FLAGS
   -Wall
   -Wextra
   -Wpedantic
   -Wconversion
   -Wshadow
+)
+
+if (MSWIKI_STRICT_CLANG AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  list(APPEND MSWIKI_WARNING_FLAGS
+    -Weverything
+    # Project is C++11-only; compatibility-to-C++98 warnings are not actionable.
+    -Wno-c++98-compat
+    -Wno-c++98-compat-pedantic
+    # Struct padding warnings are noisy and not correctness issues for this app.
+    -Wno-padded
+    # Some developer environments inject host include paths that trigger this.
+    -Wno-poison-system-directories
+  )
+endif()
+
+if (MSWIKI_WARNINGS_AS_ERRORS)
+  list(APPEND MSWIKI_WARNING_FLAGS -Werror)
+endif()
+
+target_compile_options(mswiki PRIVATE
+  ${MSWIKI_WARNING_FLAGS}
   -fno-exceptions
   -fno-rtti
 )
@@ -34,11 +57,7 @@ if (MSWIKI_FUZZING)
   function(add_mswiki_fuzz_target target_name source_file)
     add_executable(${target_name} ${source_file})
     target_compile_options(${target_name} PRIVATE
-      -Wall
-      -Wextra
-      -Wpedantic
-      -Wconversion
-      -Wshadow
+      ${MSWIKI_WARNING_FLAGS}
       -fno-exceptions
       -fno-rtti
       -O1
