@@ -157,6 +157,24 @@ int FindFootnoteIndex(const char ids[][MAX_FOOTNOTE_ID],
 }
 
 /*
+ * Check whether markdown URL target is a strict `/document/<id>` path.
+ */
+bool IsDocumentLinkTarget(const char* url, size_t len) {
+  if (url == nullptr || len <= 10U || std::strncmp(url, "/document/", 10U) != 0) {
+    return false;
+  }
+  const size_t idLen = len - 10U;
+  char idText[32];
+  if (idLen == 0U || idLen + 1U > sizeof(idText)) {
+    return false;
+  }
+  (void)std::memcpy(idText, url + 10U, idLen);
+  idText[idLen] = '\0';
+  int documentId = 0;
+  return ParsePositiveIntStrict(idText, &documentId);
+}
+
+/*
  * Find the next unescaped `*` or `**` run that closes emphasis markup.
  */
 bool FindClosingAsteriskRun(const char* text,
@@ -497,6 +515,8 @@ bool WriteInlineMarkdown(TextBuffer* out,
         if (FindMarkdownLinkCloseParen(text, len, closeBracket + 2U,
                                        &closeParen)) {
           const size_t urlLen = closeParen - (closeBracket + 2U);
+          const bool isDocumentLink =
+              IsDocumentLinkTarget(text + closeBracket + 2U, urlLen);
           if (!IsSafeMarkdownUrl(text + closeBracket + 2U, urlLen, true)) {
             if (!BufferAppendEscaped(out, text + i, closeParen + 1U - i)) {
               return false;
@@ -511,7 +531,11 @@ bool WriteInlineMarkdown(TextBuffer* out,
                                    closeParen - (closeBracket + 2U))) {
             return false;
           }
-          if (!BufferAppend(out, "\">")) {
+          if (isDocumentLink) {
+            if (!BufferAppend(out, "\" target=\"_blank\" rel=\"noopener\">")) {
+              return false;
+            }
+          } else if (!BufferAppend(out, "\">")) {
             return false;
           }
           if (!BufferAppendEscaped(out, text + i + 1U,
@@ -520,6 +544,11 @@ bool WriteInlineMarkdown(TextBuffer* out,
           }
           if (!BufferAppend(out, "</a>")) {
             return false;
+          }
+          if (isDocumentLink) {
+            if (!BufferAppend(out, "<span class=\"pdf-tag\">[pdf]</span>")) {
+              return false;
+            }
           }
           i = closeParen + 1U;
           continue;

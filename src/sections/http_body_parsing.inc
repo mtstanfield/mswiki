@@ -24,10 +24,15 @@ const unsigned char* FindBytes(const unsigned char* haystack,
 }
 
 /*
- * Parse multipart/form-data payload and extract first `image` part.
+ * Parse multipart/form-data payload and extract first requested part.
  */
-void ParseMultipartImage(const HttpRequest* request, MultipartImage* image) {
-  image->valid = false;
+void ParseMultipartField(const HttpRequest* request,
+                         const char* fieldName,
+                         MultipartImage* filePart) {
+  filePart->valid = false;
+  if (fieldName == nullptr || fieldName[0] == '\0') {
+    return;
+  }
 
   const char* contentType = FindHeader(request, "content-type");
   if (contentType == nullptr) {
@@ -151,8 +156,13 @@ void ParseMultipartImage(const HttpRequest* request, MultipartImage* image) {
       line = next + 2;
     }
 
-    const bool isImageField =
-        std::strstr(disposition, "name=\"image\"") != nullptr;
+    char fieldNeedle[80];
+    if (std::snprintf(fieldNeedle, sizeof(fieldNeedle), "name=\"%s\"",
+                      fieldName) < 0) {
+      return;
+    }
+    const bool matchesField =
+        std::strstr(disposition, fieldNeedle) != nullptr;
 
     const unsigned char* dataEnd = FindBytes(
         search, remaining, reinterpret_cast<const unsigned char*>("\r\n"), 2U);
@@ -182,7 +192,7 @@ void ParseMultipartImage(const HttpRequest* request, MultipartImage* image) {
 
     const size_t partDataLen = static_cast<size_t>(dataEnd - search);
 
-    if (isImageField) {
+    if (matchesField) {
       char filename[MAX_FILENAME];
       filename[0] = '\0';
       const char* fn = std::strstr(disposition, "filename=\"");
@@ -201,16 +211,17 @@ void ParseMultipartImage(const HttpRequest* request, MultipartImage* image) {
         (void)CopyString(filename, sizeof(filename), "upload.bin");
       }
 
-      (void)CopyString(image->filename, sizeof(image->filename), filename);
+      (void)CopyString(filePart->filename, sizeof(filePart->filename), filename);
       if (partMime[0] == '\0') {
-        (void)CopyString(image->mimeType, sizeof(image->mimeType),
+        (void)CopyString(filePart->mimeType, sizeof(filePart->mimeType),
                          "application/octet-stream");
       } else {
-        (void)CopyString(image->mimeType, sizeof(image->mimeType), partMime);
+        (void)CopyString(filePart->mimeType, sizeof(filePart->mimeType),
+                         partMime);
       }
-      image->data = search;
-      image->dataLen = partDataLen;
-      image->valid = (partDataLen > 0U);
+      filePart->data = search;
+      filePart->dataLen = partDataLen;
+      filePart->valid = (partDataLen > 0U);
       return;
     }
 
@@ -221,6 +232,21 @@ void ParseMultipartImage(const HttpRequest* request, MultipartImage* image) {
     search = body + nextStartOffset;
     remaining = bodyLen - nextStartOffset;
   }
+}
+
+/*
+ * Parse multipart/form-data payload and extract first `image` part.
+ */
+void ParseMultipartImage(const HttpRequest* request, MultipartImage* image) {
+  ParseMultipartField(request, "image", image);
+}
+
+/*
+ * Parse multipart/form-data payload and extract first `document` part.
+ */
+void ParseMultipartDocument(const HttpRequest* request,
+                            MultipartImage* document) {
+  ParseMultipartField(request, "document", document);
 }
 
 /*

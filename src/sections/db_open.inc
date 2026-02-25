@@ -53,7 +53,17 @@ bool DbOpen(sqlite3** db, const char* dbPath, char* err, size_t errSize) {
       "data BLOB NOT NULL,"
       "created_at TEXT NOT NULL"
       ");"
-      "CREATE INDEX IF NOT EXISTS idx_images_page_slug ON images(page_slug);";
+      "CREATE INDEX IF NOT EXISTS idx_images_page_slug ON images(page_slug);"
+      "CREATE TABLE IF NOT EXISTS documents ("
+      "id INTEGER PRIMARY KEY,"
+      "page_slug TEXT NOT NULL,"
+      "filename TEXT NOT NULL,"
+      "mime_type TEXT NOT NULL,"
+      "data BLOB NOT NULL,"
+      "created_at TEXT NOT NULL"
+      ");"
+      "CREATE INDEX IF NOT EXISTS idx_documents_page_slug ON "
+      "documents(page_slug);";
 
   char* sqliteErr = nullptr;
   if (sqlite3_exec(*db, migrationSql, nullptr, nullptr, &sqliteErr) !=

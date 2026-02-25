@@ -206,6 +206,7 @@ bool DbDeletePage(sqlite3* db, const char* slug, char* err, size_t errSize) {
       {"DELETE FROM page_links WHERE from_slug = ?", 1},
       {"DELETE FROM page_links WHERE to_slug = ?", 1},
       {"DELETE FROM images WHERE page_slug = ?", 1},
+      {"DELETE FROM documents WHERE page_slug = ?", 1},
       {"DELETE FROM pages WHERE slug = ?", 1},
   };
 
