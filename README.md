@@ -23,7 +23,7 @@
   - Fenced code blocks (triple backticks)
   - Blockquotes (`> `)
   - Lists (`- item` or `* item`)
-  - One-level nested sublists (`-- child item` under current list item)
+  - One-level nested sublists (`-- child item` or `** child item` under current list item)
   - Inline links and images
   - Footnotes (`[^id]` + `[^id]: text`)
 - Tufte-inspired view styling:

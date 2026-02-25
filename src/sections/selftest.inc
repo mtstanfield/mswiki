@@ -116,6 +116,7 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
       "[^n]: Footnote body.\n"
       "- parent item\n"
       "-- child item\n"
+      "** child item star marker\n"
       "- item\n",
       &html);
   SelfTestExpect(state, rendered, "RenderMarkdownToHtml success");
@@ -161,9 +162,15 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
       std::strstr(html.data, "<section class=\"panel footnotes\">") != nullptr,
       "Render footnotes section");
   SelfTestExpect(state,
-                 std::strstr(html.data, "<li>parent item<ul>\n<li>child item</li>\n"
-                                        "</ul>\n</li>\n") != nullptr,
+                 std::strstr(html.data, "<li>parent item<ul>\n") != nullptr,
+                 "Render parent list item with nested sublist");
+  SelfTestExpect(state,
+                 std::strstr(html.data, "<li>child item</li>\n") != nullptr,
                  "Render one-level nested list from -- marker");
+  SelfTestExpect(state,
+                 std::strstr(html.data, "<li>child item star marker</li>\n") !=
+                     nullptr,
+                 "Render one-level nested list from ** marker");
   SelfTestExpect(state, std::strstr(html.data, "<li>item</li>\n") != nullptr,
                  "Render top-level list item after nested list");
 

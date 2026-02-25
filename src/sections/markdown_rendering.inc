@@ -745,7 +745,9 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
         return false;
       }
       inTopListItem = true;
-    } else if (lineLen > 3U && line[0] == '-' && line[1] == '-' &&
+    } else if (lineLen > 3U &&
+               ((line[0] == '-' && line[1] == '-') ||
+                (line[0] == '*' && line[1] == '*')) &&
                line[2] == ' ') {
       if (!inList || !inTopListItem) {
         if (!BufferAppend(html, "<p>")) {
