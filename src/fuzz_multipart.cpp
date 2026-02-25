@@ -64,7 +64,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   }
   AppendString(&body, "\r\n");
 
-  const size_t payloadCap = 4096U;
+  const size_t payloadCap = 64U * 1024U;
   size_t payloadLen = (cursor < size) ? (size - cursor) : 0U;
   if (payloadLen > payloadCap) {
     payloadLen = payloadCap;

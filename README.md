@@ -117,7 +117,7 @@ Run the markdown renderer fuzz target:
 docker run --rm --platform linux/amd64 \
   --entrypoint /src/fuzz-build/mswiki_markdown_fuzz \
   mswiki:fuzz \
-  -dict=/src/fuzz/markdown.dict -max_total_time=3600 /corpus/markdown
+  -dict=/src/fuzz/markdown.dict -timeout=5 -max_total_time=3600 /corpus/markdown
 ```
 
 Run the multipart parser fuzz target:
@@ -126,7 +126,7 @@ Run the multipart parser fuzz target:
 docker run --rm --platform linux/amd64 \
   --entrypoint /src/fuzz-build/mswiki_multipart_fuzz \
   mswiki:fuzz \
-  -dict=/src/fuzz/multipart.dict -max_total_time=3600 /corpus/multipart
+  -dict=/src/fuzz/multipart.dict -timeout=5 -max_len=65536 -max_total_time=3600 /corpus/multipart
 ```
 
 If you want corpus persistence across runs, mount a host corpus directory:

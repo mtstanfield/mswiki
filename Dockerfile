@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     clang-14 \
     cmake \
+    llvm-14 \
     libclang-rt-14-dev \
     libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -31,6 +32,7 @@ RUN mkdir -p /corpus/http_request /corpus/markdown /corpus/multipart \
     && cp -f /src/fuzz/seeds/markdown/* /corpus/markdown/ \
     && cp -f /src/fuzz/seeds/multipart/*.bin /corpus/multipart/
 ENV ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:symbolize=1
+ENV ASAN_SYMBOLIZER_PATH=/usr/bin/llvm-symbolizer-14
 ENV UBSAN_OPTIONS=print_stacktrace=1
 ENTRYPOINT ["/src/fuzz-build/mswiki_http_fuzz", "-dict=/src/fuzz/http_request.dict", "-timeout=5", "-max_total_time=60", "/corpus/http_request"]
 
