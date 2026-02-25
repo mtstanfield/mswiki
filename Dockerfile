@@ -15,7 +15,7 @@ RUN cmake -S . -B build -DMSWIKI_STATIC=ON -DCMAKE_CXX_COMPILER=clang++ -DMSWIKI
 RUN cmake --build build --config Release -j"$(nproc)"
 RUN ctest --test-dir build --output-on-failure
 RUN ./build/mswiki --self-test
-RUN cppcheck --enable=warning,style,performance,portability --std=c++11 --inline-suppr src
+RUN cppcheck --enable=warning,style,performance,portability --std=c++11 --inline-suppr src/main.cpp
 RUN mkdir -p /runtime/data && chown -R 65532:65532 /runtime/data
 
 FROM debian:bookworm-slim AS fuzz

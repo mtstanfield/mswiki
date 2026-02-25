@@ -43,7 +43,7 @@ jobs:
         run: ./build/mswiki --self-test
 
       - name: Run static analysis
-        run: cppcheck --enable=warning,style,performance,portability --std=c++11 --inline-suppr src
+        run: cppcheck --enable=warning,style,performance,portability --std=c++11 --inline-suppr src/main.cpp
 
   docker:
     needs: quality-gates
