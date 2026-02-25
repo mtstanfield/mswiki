@@ -31,6 +31,12 @@ if (MSWIKI_STRICT_CLANG AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # Some developer environments inject host include paths that trigger this.
     -Wno-poison-system-directories
   )
+  # Clang 16+ enables unsafe-buffer diagnostics under -Weverything.
+  # This codebase intentionally uses bounded C-style buffers for C++11
+  # portability, so this warning family is currently too noisy to gate on.
+  if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16)
+    list(APPEND MSWIKI_WARNING_FLAGS -Wno-unsafe-buffer-usage)
+  endif()
 endif()
 
 if (MSWIKI_WARNINGS_AS_ERRORS)
