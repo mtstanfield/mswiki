@@ -232,6 +232,11 @@ const unsigned char* FindBytes(const unsigned char* haystack,
                                size_t needleLen);
 const char* DetectImageMimeFromData(const unsigned char* data, size_t len);
 const char* DetectDocumentMimeFromData(const unsigned char* data, size_t len);
+bool BuildPageLayout(const char* title,
+                     const char* content,
+                     const char* headerLinkHref,
+                     const char* headerLinkLabel,
+                     TextBuffer* out);
 void HandleRequest(sqlite3* db,
                    RequestArena* arena,
                    const HttpRequest* request,
@@ -973,6 +978,45 @@ void SetError(HttpResponse* response, int status, const char* message) {
               len);
 }
 
+/*
+ * Render a styled 404 page within the standard site layout.
+ */
+bool BuildNotFoundHtml(RequestArena* arena, TextBuffer* page) {
+  TextBuffer content;
+  if (!ArenaAllocTextBuffer(arena, &content, MAX_RESPONSE_BYTES)) {
+    return false;
+  }
+  if (!BufferAppend(
+          &content,
+          "<article>\n"
+          "<h1>404</h1>\n"
+          "<p class=\"notice\">The page you requested was not found.</p>\n"
+          "<div class=\"form-actions\">\n"
+          "<a class=\"button-link button-secondary\" href=\"/page/home\">Home</a>\n"
+          "<a class=\"button-link button-secondary\" href=\"/all\">All Pages</a>\n"
+          "</div>\n"
+          "</article>\n")) {
+    return false;
+  }
+  BufferReset(page);
+  return BuildPageLayout("404 Not Found", content.data, nullptr, nullptr, page);
+}
+
+/*
+ * Build and assign a styled HTML 404 response.
+ */
+bool SetNotFoundPageResponse(RequestArena* arena, HttpResponse* response) {
+  TextBuffer html;
+  if (!ArenaAllocTextBuffer(arena, &html, MAX_RESPONSE_BYTES)) {
+    return false;
+  }
+  if (!BuildNotFoundHtml(arena, &html)) {
+    return false;
+  }
+  return SetResponseCopy(response, 404, "text/html; charset=utf-8", html.data,
+                         html.length);
+}
+
 #include "sections/http_parsing.inc"
 
 #include "sections/http_body_parsing.inc"
@@ -1305,7 +1349,8 @@ bool BuildPageLayout(const char* title,
   if (!HtmlWriteIndent(&writer)) {
     return false;
   }
-  if (!BufferAppend(out, "<a class=\"brand\" href=\"/page/home\">")) {
+  if (!BufferAppend(
+          out, "<a class=\"brand\" href=\"https://github.com/mtstanfield/mswiki\">")) {
     return false;
   }
   if (!BufferAppend(out,
@@ -1395,8 +1440,8 @@ void BuildDefaultCss(TextBuffer* css) {
       ":root{--bg:#f8f5ee;--surface:#fffdf9;--text:#1e1c1a;--muted:#6b6259;"
       "--line:#ded5c7;--accent:#1f5d78;--accent-hover:#17465a;--paper:#fffcf7;}"
       "*{box-sizing:border-box;}"
-      "body{margin:0;padding:0;background:linear-gradient(180deg,#fdfaf4 "
-      "0%,#f4ede2 100%);"
+      "html{background:var(--bg);}"
+      "body{margin:0;padding:0;min-height:100vh;background:var(--bg);"
       "color:var(--text);font-family:\"ETBembo\",\"Iowan Old Style\","
       "\"Palatino Linotype\",Palatino,serif;line-height:1.62;}"
       "header{border-bottom:1px solid var(--line);background:var(--paper);}"
@@ -2613,7 +2658,9 @@ void HandleRequest(sqlite3* db,
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(request->path + 6, slug, sizeof(slug))) {
       if (IsNestedSlugSuffix(request->path + 6)) {
-        SetError(response, 404, "Not found");
+        if (!SetNotFoundPageResponse(arena, response)) {
+          SetError(response, 500, "Failed to build 404 page");
+        }
       } else {
         SetError(response, 400, "Invalid page slug");
       }
@@ -2732,7 +2779,9 @@ void HandleRequest(sqlite3* db,
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(request->path + 12, slug, sizeof(slug))) {
       if (IsNestedSlugSuffix(request->path + 12)) {
-        SetError(response, 404, "Not found");
+        if (!SetNotFoundPageResponse(arena, response)) {
+          SetError(response, 500, "Failed to build 404 page");
+        }
       } else {
         SetError(response, 400, "Invalid page slug");
       }
@@ -2746,7 +2795,9 @@ void HandleRequest(sqlite3* db,
       return;
     }
     if (!found) {
-      SetError(response, 404, "Page not found");
+      if (!SetNotFoundPageResponse(arena, response)) {
+        SetError(response, 500, "Failed to build 404 page");
+      }
       return;
     }
 
@@ -2772,7 +2823,9 @@ void HandleRequest(sqlite3* db,
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(request->path + 15, slug, sizeof(slug))) {
       if (IsNestedSlugSuffix(request->path + 15)) {
-        SetError(response, 404, "Not found");
+        if (!SetNotFoundPageResponse(arena, response)) {
+          SetError(response, 500, "Failed to build 404 page");
+        }
       } else {
         SetError(response, 400, "Invalid page slug");
       }
@@ -2786,7 +2839,9 @@ void HandleRequest(sqlite3* db,
       return;
     }
     if (!found) {
-      SetError(response, 404, "Page not found");
+      if (!SetNotFoundPageResponse(arena, response)) {
+        SetError(response, 500, "Failed to build 404 page");
+      }
       return;
     }
 
@@ -3034,7 +3089,9 @@ void HandleRequest(sqlite3* db,
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(request->path + 6, slug, sizeof(slug))) {
       if (IsNestedSlugSuffix(request->path + 6)) {
-        SetError(response, 404, "Not found");
+        if (!SetNotFoundPageResponse(arena, response)) {
+          SetError(response, 500, "Failed to build 404 page");
+        }
       } else {
         SetError(response, 400, "Invalid page slug");
       }
@@ -3077,6 +3134,13 @@ void HandleRequest(sqlite3* db,
   if (std::strcmp(request->method, "GET") != 0 &&
       std::strcmp(request->method, "POST") != 0) {
     SetError(response, 405, "Only GET and POST are supported");
+    return;
+  }
+
+  if (std::strcmp(request->method, "GET") == 0) {
+    if (!SetNotFoundPageResponse(arena, response)) {
+      SetError(response, 500, "Failed to build 404 page");
+    }
     return;
   }
 

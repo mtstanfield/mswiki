@@ -769,6 +769,15 @@ void SelfTestHttpHandler(SelfTestState* state) {
                  "Missing page response content");
   SelfTestExpect(
       state,
+      std::strcmp(response.contentType, "text/html; charset=utf-8") == 0,
+      "Missing page response content type");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "<h1>home</h1>") != nullptr,
+      "Missing page response includes requested slug heading");
+  SelfTestExpect(
+      state,
       std::strstr(reinterpret_cast<const char*>(response.body),
                   "<html lang=\"en\">") != nullptr,
       "Page layout sets HTML language");
@@ -796,6 +805,27 @@ void SelfTestHttpHandler(SelfTestState* state) {
                   "<form class=\"header-search\" method=\"get\" "
                   "action=\"/search\">") != nullptr,
       "Page layout includes header search form");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "class=\"brand\" href=\"https://github.com/mtstanfield/mswiki\"") !=
+          nullptr,
+      "Page layout brand link points to project repository");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/style.css");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 200, "HandleRequest GET /style.css");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "body{margin:0;padding:0;min-height:100vh;"
+                             "background:var(--bg);") != nullptr,
+                 "Stylesheet keeps uniform page background on short pages");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "linear-gradient(") == nullptr,
+                 "Stylesheet does not use page background gradient");
 
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
@@ -813,6 +843,14 @@ void SelfTestHttpHandler(SelfTestState* state) {
   HandleRequest(db, &arena, &request, &response);
   SelfTestExpect(state, response.status == 404,
                  "HandleRequest GET /pages returns 404");
+  SelfTestExpect(state,
+                 std::strcmp(response.contentType, "text/html; charset=utf-8") ==
+                     0,
+                 "Deprecated /pages returns HTML 404 page");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "<h1>404</h1>") != nullptr,
+                 "/pages 404 page includes heading");
 
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
@@ -820,6 +858,10 @@ void SelfTestHttpHandler(SelfTestState* state) {
   HandleRequest(db, &arena, &request, &response);
   SelfTestExpect(state, response.status == 404,
                  "HandleRequest GET /page/<nested> returns 404");
+  SelfTestExpect(state,
+                 std::strcmp(response.contentType, "text/html; charset=utf-8") ==
+                     0,
+                 "Nested /page path returns HTML 404 page");
 
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
@@ -827,6 +869,10 @@ void SelfTestHttpHandler(SelfTestState* state) {
   HandleRequest(db, &arena, &request, &response);
   SelfTestExpect(state, response.status == 404,
                  "HandleRequest GET /edit/<nested> returns 404");
+  SelfTestExpect(state,
+                 std::strcmp(response.contentType, "text/html; charset=utf-8") ==
+                     0,
+                 "Nested /edit path returns HTML 404 page");
 
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
@@ -1104,6 +1150,10 @@ void SelfTestHttpHandler(SelfTestState* state) {
   HandleRequest(db, &arena, &request, &response);
   SelfTestExpect(state, response.status == 404,
                  "HandleRequest GET /images/new/<missing> returns 404");
+  SelfTestExpect(state,
+                 std::strcmp(response.contentType, "text/html; charset=utf-8") ==
+                     0,
+                 "Missing image upload page returns HTML 404 page");
 
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
@@ -1118,6 +1168,10 @@ void SelfTestHttpHandler(SelfTestState* state) {
   HandleRequest(db, &arena, &request, &response);
   SelfTestExpect(state, response.status == 404,
                  "HandleRequest GET /documents/new/<missing> returns 404");
+  SelfTestExpect(
+      state,
+      std::strcmp(response.contentType, "text/html; charset=utf-8") == 0,
+      "Missing document upload page returns HTML 404 page");
 
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "POST");
@@ -1453,6 +1507,15 @@ void SelfTestHttpHandler(SelfTestState* state) {
   HandleRequest(db, &arena, &logoRequest, &logoResponse);
   SelfTestExpect(state, logoResponse.status == 404,
                  "HandleRequest no longer serves /logo");
+  SelfTestExpect(state,
+                 std::strcmp(logoResponse.contentType,
+                             "text/html; charset=utf-8") == 0,
+                 "Unknown GET route returns HTML 404 page");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(logoResponse.body),
+                  "The page you requested was not found.") != nullptr,
+      "404 page includes user-friendly message");
 
   (void)sqlite3_close(db);
 }
