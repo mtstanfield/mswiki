@@ -141,6 +141,12 @@ bool DbAppendImagesHtml(sqlite3* db,
                         bool includeInsertButtons,
                         char* err,
                         size_t errSize);
+bool DbAppendDocumentsHtml(sqlite3* db,
+                           const char* slug,
+                           TextBuffer* html,
+                           bool includeInsertButtons,
+                           char* err,
+                           size_t errSize);
 bool DbInsertImage(sqlite3* db,
                    const char* pageSlug,
                    const char* filename,
@@ -150,6 +156,15 @@ bool DbInsertImage(sqlite3* db,
                    int* imageId,
                    char* err,
                    size_t errSize);
+bool DbInsertDocument(sqlite3* db,
+                      const char* pageSlug,
+                      const char* filename,
+                      const char* mimeType,
+                      const unsigned char* data,
+                      size_t dataLen,
+                      int* documentId,
+                      char* err,
+                      size_t errSize);
 bool DbGetImage(sqlite3* db,
                 int id,
                 char* mimeType,
@@ -160,16 +175,32 @@ bool DbGetImage(sqlite3* db,
                 bool* found,
                 char* err,
                 size_t errSize);
+bool DbGetDocument(sqlite3* db,
+                   int id,
+                   char* mimeType,
+                   size_t mimeTypeSize,
+                   const unsigned char** data,
+                   int* dataLen,
+                   sqlite3_stmt** stmtOut,
+                   bool* found,
+                   char* err,
+                   size_t errSize);
 bool DbDeleteImage(sqlite3* db,
                    int id,
                    const char* pageSlug,
                    char* err,
                    size_t errSize);
+bool DbDeleteDocument(sqlite3* db,
+                      int id,
+                      const char* pageSlug,
+                      char* err,
+                      size_t errSize);
 bool ParseFormField(const HttpRequest* request,
                     const char* key,
                     char* out,
                     size_t outSize);
 void ParseMultipartImage(const HttpRequest* request, MultipartImage* image);
+void ParseMultipartDocument(const HttpRequest* request, MultipartImage* document);
 bool ParseRequestLine(const char* line, HttpRequest* request);
 bool ParseHttpRequest(unsigned char* raw,
                       size_t rawLen,
@@ -187,6 +218,7 @@ const unsigned char* FindBytes(const unsigned char* haystack,
                                const unsigned char* needle,
                                size_t needleLen);
 const char* DetectImageMimeFromData(const unsigned char* data, size_t len);
+const char* DetectDocumentMimeFromData(const unsigned char* data, size_t len);
 void HandleRequest(sqlite3* db,
                    RequestArena* arena,
                    const HttpRequest* request,
@@ -820,6 +852,8 @@ void SetError(HttpResponse* response, int status, const char* message) {
 
 #include "sections/db_images.inc"
 
+#include "sections/db_documents.inc"
+
 /*
  * Identify image MIME from binary signatures (magic bytes).
  */
@@ -842,6 +876,19 @@ const char* DetectImageMimeFromData(const unsigned char* data, size_t len) {
   if (len >= 12U && std::memcmp(data, "RIFF", 4U) == 0 &&
       std::memcmp(data + 8U, "WEBP", 4U) == 0) {
     return "image/webp";
+  }
+  return nullptr;
+}
+
+/*
+ * Identify document MIME from binary signatures (currently PDF only).
+ */
+const char* DetectDocumentMimeFromData(const unsigned char* data, size_t len) {
+  if (data == nullptr || len < 5U) {
+    return nullptr;
+  }
+  if (std::memcmp(data, "%PDF-", 5U) == 0) {
+    return "application/pdf";
   }
   return nullptr;
 }
@@ -1225,13 +1272,16 @@ void BuildDefaultCss(TextBuffer* css) {
       "var(--accent);background:#eef7fb;}"
       ".panel{margin-top:16px;padding-top:12px;border-top:1px solid "
       "var(--line);}"
-      "ul.page-list,ul.backlinks,ul.images{padding-left:18px;}"
+      "ul.page-list,ul.backlinks,ul.images,ul.documents{padding-left:18px;}"
       "pre{background:#f7f3ea;color:var(--text);padding:12px;border-radius:8px;"
       "border:1px solid var(--line);overflow-x:auto;}"
       "code{font-family:\"SF "
       "Mono\",Menlo,Consolas,monospace;background:#eef2ff;padding:0 "
       "4px;border-radius:4px;color:#111827;}"
       "pre code{background:transparent;color:inherit;padding:0;}"
+      ".pdf-tag{display:inline-block;margin-left:6px;padding:0 4px;border:1px "
+      "solid var(--line);border-radius:4px;font-size:.72rem;color:var(--muted);"
+      "background:#f5efe4;vertical-align:baseline;}"
       ".margin-figure,.sidenote{float:right;clear:right;width:32%;margin-right:"
       "-38%;"
       "font-size:.9rem;line-height:1.45;color:var(--muted);}"
@@ -1407,7 +1457,8 @@ bool AppendEditorToolbarScript(TextBuffer* content) {
       "start+action.insertText.length);}});"
       "document.addEventListener('click',function(event){var target="
       "event.target;while(target&&target!==document){if(target.nodeType===1&&"
-      "target.classList&&target.classList.contains('md-insert-image')){"
+      "target.classList&&(target.classList.contains('md-insert-image')||"
+      "target.classList.contains('md-insert-document'))){"
       "event.preventDefault();var snippet=target.getAttribute("
       "'data-md-snippet');if(typeof snippet!=='string'||snippet.length===0){"
       "return;}var start=clamp(editor.selectionStart,0,editor.value.length);"
@@ -1526,6 +1577,24 @@ bool BuildEditHtml(sqlite3* db,
     return false;
   }
   if (!DbAppendImagesHtml(db, slug, &content, true, err, errSize)) {
+    return false;
+  }
+  if (!BufferAppend(&content, "</section>\n")) {
+    return false;
+  }
+  if (!BufferAppend(&content, "<section class=\"panel\">\n"
+                              "<h2>Documents for this page</h2>\n"
+                              "<p><a class=\"button-link button-secondary\" "
+                              "href=\"/documents/new/")) {
+    return false;
+  }
+  if (!BufferAppend(&content, encodedSlug)) {
+    return false;
+  }
+  if (!BufferAppend(&content, "\">Upload document</a></p>\n")) {
+    return false;
+  }
+  if (!DbAppendDocumentsHtml(db, slug, &content, true, err, errSize)) {
     return false;
   }
   if (!BufferAppend(&content, "</section>\n")) {
@@ -1670,6 +1739,14 @@ bool BuildViewHtml(sqlite3* db,
     return false;
   }
 
+  if (!BufferAppend(&content, "</section>\n<section class=\"panel\">\n"
+                              "<h2>Documents</h2>\n")) {
+    return false;
+  }
+  if (!DbAppendDocumentsHtml(db, pageRecord->slug, &content, false, err,
+                             errSize)) {
+    return false;
+  }
   if (!BufferAppend(&content, "</section>\n</article>\n")) {
     return false;
   }
@@ -1776,6 +1853,101 @@ bool BuildImageUploadedPage(RequestArena* arena,
 }
 
 /*
+ * Render the document upload form for a page slug.
+ */
+bool BuildDocumentUploadForm(RequestArena* arena,
+                             const char* slug,
+                             TextBuffer* page) {
+  TextBuffer content;
+  if (!ArenaAllocTextBuffer(arena, &content, MAX_RESPONSE_BYTES)) {
+    return false;
+  }
+
+  char encodedSlug[MAX_PATH];
+  if (!UrlEncode(slug, encodedSlug, sizeof(encodedSlug))) {
+    return false;
+  }
+
+  if (!BufferAppend(&content, "<article>\n<h1>Upload document for ")) {
+    return false;
+  }
+  if (!BufferAppendEscaped(&content, slug, std::strlen(slug))) {
+    return false;
+  }
+  if (!BufferAppend(
+          &content,
+          "</h1><form method=\"post\" enctype=\"multipart/form-data\" "
+          "action=\"/documents/upload/")) {
+    return false;
+  }
+  if (!BufferAppend(&content, encodedSlug)) {
+    return false;
+  }
+  if (!BufferAppend(
+          &content,
+          "\">\n<input type=\"file\" name=\"document\" "
+          "accept=\"application/pdf,.pdf\" required>"
+          "<br><br>\n<div class=\"form-actions\">"
+          "<button type=\"submit\" class=\"action-button\">Upload</button> "
+          "<a class=\"button-link button-secondary\" href=\"/page/")) {
+    return false;
+  }
+  if (!BufferAppend(&content, encodedSlug)) {
+    return false;
+  }
+  if (!BufferAppend(&content, "\">Back</a></div>\n</form>\n</article>\n")) {
+    return false;
+  }
+
+  BufferReset(page);
+  return BuildPageLayout("Upload Document", content.data, nullptr, nullptr, page);
+}
+
+/*
+ * Render upload-success page showing markdown link syntax for a PDF.
+ */
+bool BuildDocumentUploadedPage(RequestArena* arena,
+                               const char* slug,
+                               const char* filename,
+                               int documentId,
+                               TextBuffer* page) {
+  TextBuffer content;
+  if (!ArenaAllocTextBuffer(arena, &content, MAX_RESPONSE_BYTES)) {
+    return false;
+  }
+
+  char encodedSlug[MAX_PATH];
+  if (!UrlEncode(slug, encodedSlug, sizeof(encodedSlug))) {
+    return false;
+  }
+
+  if (!BufferAppend(&content,
+                    "<article>\n<h1>Document uploaded</h1>\n"
+                    "<p>Use this markdown in your page:</p>\n"
+                    "<pre><code>[")) {
+    return false;
+  }
+  if (!BufferAppendEscaped(&content, filename, std::strlen(filename))) {
+    return false;
+  }
+  if (!BufferAppendFormat(&content, "](/document/%d)</code></pre>\n"
+                                    "<p><a href=\"/edit/",
+                          documentId)) {
+    return false;
+  }
+  if (!BufferAppend(&content, encodedSlug)) {
+    return false;
+  }
+  if (!BufferAppend(&content, "\">Back to edit page</a></p>\n</article>\n")) {
+    return false;
+  }
+
+  BufferReset(page);
+  return BuildPageLayout("Document Uploaded", content.data, nullptr, nullptr,
+                         page);
+}
+
+/*
  * Build final stylesheet content.
  */
 void BuildStyleCss(TextBuffer* css) {
@@ -1875,6 +2047,47 @@ void HandleRequest(sqlite3* db,
     (void)sqlite3_finalize(stmt);
     const char* detectedMime =
         DetectImageMimeFromData(gBinaryBuffer, static_cast<size_t>(blobLen));
+    const char* safeMime =
+        (detectedMime == nullptr) ? "application/octet-stream" : detectedMime;
+    (void)mime;
+    SetResponse(response, 200, safeMime, gBinaryBuffer,
+                static_cast<size_t>(blobLen));
+    return;
+  }
+
+  if (std::strcmp(request->method, "GET") == 0 &&
+      std::strncmp(request->path, "/document/", 10) == 0) {
+    const char* idText = request->path + 10;
+    int documentId = 0;
+    if (!ParsePositiveIntStrict(idText, &documentId)) {
+      SetError(response, 400, "Invalid document id");
+      return;
+    }
+
+    char mime[MAX_MIME];
+    const unsigned char* blobData = nullptr;
+    int blobLen = 0;
+    sqlite3_stmt* stmt = nullptr;
+    bool found = false;
+    char err[256];
+    if (!DbGetDocument(db, documentId, mime, sizeof(mime), &blobData, &blobLen,
+                       &stmt, &found, err, sizeof(err))) {
+      SetError(response, 500, err);
+      return;
+    }
+    if (!found) {
+      SetError(response, 404, "Document not found");
+      return;
+    }
+    if (blobLen < 0 || static_cast<size_t>(blobLen) > sizeof(gBinaryBuffer)) {
+      (void)sqlite3_finalize(stmt);
+      SetError(response, 500, "Document too large");
+      return;
+    }
+    (void)std::memcpy(gBinaryBuffer, blobData, static_cast<size_t>(blobLen));
+    (void)sqlite3_finalize(stmt);
+    const char* detectedMime =
+        DetectDocumentMimeFromData(gBinaryBuffer, static_cast<size_t>(blobLen));
     const char* safeMime =
         (detectedMime == nullptr) ? "application/octet-stream" : detectedMime;
     (void)mime;
@@ -2043,11 +2256,47 @@ void HandleRequest(sqlite3* db,
     return;
   }
 
+  if (std::strcmp(request->method, "GET") == 0 &&
+      std::strncmp(request->path, "/documents/new/", 15) == 0) {
+    char slug[MAX_SLUG];
+    if (!DecodeRouteSlugStrict(request->path + 15, slug, sizeof(slug))) {
+      SetError(response, 400, "Invalid page slug");
+      return;
+    }
+
+    TextBuffer html;
+    if (!ArenaAllocTextBuffer(arena, &html, MAX_RESPONSE_BYTES)) {
+      SetError(response, 500, "Response arena exhausted");
+      return;
+    }
+    if (!BuildDocumentUploadForm(arena, slug, &html)) {
+      SetError(response, 500, "Failed to build document upload form");
+      return;
+    }
+
+    if (!SetResponseCopy(response, 200, "text/html; charset=utf-8", html.data,
+                         html.length)) {
+      SetError(response, 500, "HTML response too large");
+    }
+    return;
+  }
+
   if (std::strcmp(request->method, "POST") == 0 &&
       std::strncmp(request->path, "/images/upload/", 15) == 0) {
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(request->path + 15, slug, sizeof(slug))) {
       SetError(response, 400, "Invalid page slug");
+      return;
+    }
+    PageRecord pageRecord;
+    bool found = false;
+    char err[256];
+    if (!DbGetPage(db, slug, &pageRecord, &found, err, sizeof(err))) {
+      SetError(response, 500, err);
+      return;
+    }
+    if (!found) {
+      SetError(response, 404, "Page not found");
       return;
     }
 
@@ -2059,7 +2308,6 @@ void HandleRequest(sqlite3* db,
     }
 
     int imageId = 0;
-    char err[256];
     const char* detectedMime =
         DetectImageMimeFromData(image.data, image.dataLen);
     if (detectedMime == nullptr) {
@@ -2079,6 +2327,65 @@ void HandleRequest(sqlite3* db,
       return;
     }
     if (!BuildImageUploadedPage(arena, slug, image.filename, imageId, &html)) {
+      SetError(response, 500, "Failed to build success page");
+      return;
+    }
+
+    if (!SetResponseCopy(response, 200, "text/html; charset=utf-8", html.data,
+                         html.length)) {
+      SetError(response, 500, "HTML response too large");
+    }
+    return;
+  }
+
+  if (std::strcmp(request->method, "POST") == 0 &&
+      std::strncmp(request->path, "/documents/upload/", 18) == 0) {
+    char slug[MAX_SLUG];
+    if (!DecodeRouteSlugStrict(request->path + 18, slug, sizeof(slug))) {
+      SetError(response, 400, "Invalid page slug");
+      return;
+    }
+    PageRecord pageRecord;
+    bool found = false;
+    char err[256];
+    if (!DbGetPage(db, slug, &pageRecord, &found, err, sizeof(err))) {
+      SetError(response, 500, err);
+      return;
+    }
+    if (!found) {
+      SetError(response, 404, "Page not found");
+      return;
+    }
+
+    MultipartImage document;
+    ParseMultipartDocument(request, &document);
+    if (!document.valid) {
+      SetError(response, 400, "Missing document data");
+      return;
+    }
+
+    int documentId = 0;
+    const char* detectedMime =
+        DetectDocumentMimeFromData(document.data, document.dataLen);
+    if (detectedMime == nullptr) {
+      SetError(response, 400, "Unsupported document format");
+      return;
+    }
+
+    if (!DbInsertDocument(db, slug, document.filename, detectedMime,
+                          document.data, document.dataLen, &documentId, err,
+                          sizeof(err))) {
+      SetError(response, 500, err);
+      return;
+    }
+
+    TextBuffer html;
+    if (!ArenaAllocTextBuffer(arena, &html, MAX_RESPONSE_BYTES)) {
+      SetError(response, 500, "Response arena exhausted");
+      return;
+    }
+    if (!BuildDocumentUploadedPage(arena, slug, document.filename, documentId,
+                                   &html)) {
       SetError(response, 500, "Failed to build success page");
       return;
     }
@@ -2120,6 +2427,51 @@ void HandleRequest(sqlite3* db,
 
     char err[256];
     if (!DbDeleteImage(db, imageId, slug, err, sizeof(err))) {
+      SetError(response, 500, err);
+      return;
+    }
+
+    char encodedSlug[MAX_PATH];
+    char location[768];
+    if (!UrlEncode(slug, encodedSlug, sizeof(encodedSlug))) {
+      SetError(response, 500, "slug encode failed");
+      return;
+    }
+    (void)std::snprintf(location, sizeof(location), "/page/%s", encodedSlug);
+    SetRedirect(response, location);
+    return;
+  }
+
+  if (std::strcmp(request->method, "POST") == 0 &&
+      std::strncmp(request->path, "/documents/delete/", 18) == 0) {
+    const char* rest = request->path + 18;
+    const char* slash = std::strchr(rest, '/');
+    if (slash == nullptr) {
+      SetError(response, 400, "Invalid delete document path");
+      return;
+    }
+    char idText[32];
+    const size_t idLen = static_cast<size_t>(slash - rest);
+    if (idLen == 0U || idLen + 1U > sizeof(idText)) {
+      SetError(response, 400, "Invalid document id");
+      return;
+    }
+    (void)std::memcpy(idText, rest, idLen);
+    idText[idLen] = '\0';
+    int documentId = 0;
+    if (!ParsePositiveIntStrict(idText, &documentId)) {
+      SetError(response, 400, "Invalid document id");
+      return;
+    }
+
+    char slug[MAX_SLUG];
+    if (!DecodeRouteSlugStrict(slash + 1U, slug, sizeof(slug))) {
+      SetError(response, 400, "Invalid page slug");
+      return;
+    }
+
+    char err[256];
+    if (!DbDeleteDocument(db, documentId, slug, err, sizeof(err))) {
       SetError(response, 500, err);
       return;
     }

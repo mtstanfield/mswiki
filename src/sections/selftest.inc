@@ -103,6 +103,7 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
   const bool rendered = RenderMarkdownToHtml(
       "# Title\nWiki [[Other Page|Label]][^n]\n"
       "**Bold** and *Italic* text\n"
+      "[Doc Link](/document/7)\n"
       "***Both*** styles\n"
       "`inline` sample\n"
       "```\n"
@@ -132,6 +133,12 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
                  "Render bold emphasis");
   SelfTestExpect(state, std::strstr(html.data, "<em>Italic</em>") != nullptr,
                  "Render italic emphasis");
+  SelfTestExpect(state,
+                 std::strstr(html.data,
+                             "href=\"/document/7\" target=\"_blank\" "
+                             "rel=\"noopener\">Doc Link</a><span "
+                             "class=\"pdf-tag\">[pdf]</span>") != nullptr,
+                 "Render PDF tag for document links");
   SelfTestExpect(state,
                  std::strstr(html.data, "<strong><em>Both</em></strong>") !=
                      nullptr,
@@ -213,6 +220,11 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
                  std::strcmp(DetectImageMimeFromData(PNG_SIG, sizeof(PNG_SIG)),
                              "image/png") == 0,
                  "DetectImageMimeFromData png");
+  static const unsigned char PDF_SIG[] = {0x25U, 0x50U, 0x44U, 0x46U, 0x2DU};
+  SelfTestExpect(state,
+                 std::strcmp(DetectDocumentMimeFromData(PDF_SIG, sizeof(PDF_SIG)),
+                             "application/pdf") == 0,
+                 "DetectDocumentMimeFromData pdf");
 
   ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
   TextBuffer securityHtml;
@@ -295,6 +307,28 @@ void SelfTestFormAndMultipart(SelfTestState* state) {
   SelfTestExpect(state, image.dataLen == 7U, "ParseMultipartImage data len");
   SelfTestExpect(state, std::memcmp(image.data, "PNGDATA", 7U) == 0,
                  "ParseMultipartImage payload");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  request.headerCount = 1;
+  (void)CopyString(request.headers[0].key, sizeof(request.headers[0].key),
+                   "content-type");
+  (void)CopyString(request.headers[0].value, sizeof(request.headers[0].value),
+                   "multipart/form-data; boundary=doc123");
+  static const char DOC_MULTIPART_BODY[] =
+      "--doc123\r\n"
+      "Content-Disposition: form-data; name=\"document\"; filename=\"a.pdf\"\r\n"
+      "Content-Type: application/pdf\r\n"
+      "\r\n"
+      "%PDF-\r\n"
+      "--doc123--\r\n";
+  request.body = reinterpret_cast<const unsigned char*>(DOC_MULTIPART_BODY);
+  request.bodyLen = sizeof(DOC_MULTIPART_BODY) - 1U;
+  ParseMultipartDocument(&request, &image);
+  SelfTestExpect(state, image.valid, "ParseMultipartDocument sets valid");
+  SelfTestExpect(state, std::strcmp(image.filename, "a.pdf") == 0,
+                 "ParseMultipartDocument filename");
+  SelfTestExpect(state, std::strcmp(image.mimeType, "application/pdf") == 0,
+                 "ParseMultipartDocument mime type");
 }
 
 /*
@@ -345,12 +379,21 @@ void SelfTestDatabase(SelfTestState* state) {
                  "Backlink contains home");
 
   static const unsigned char IMAGE_DATA[] = {0x47U, 0x49U, 0x46U};
+  static const unsigned char PDF_DATA[] = {
+      0x25U, 0x50U, 0x44U, 0x46U, 0x2DU, 0x31U, 0x2EU, 0x37U};
   int imageId = 0;
   const bool insertImageOk =
       DbInsertImage(db, "home", "tiny.gif", "image/gif", IMAGE_DATA,
                     sizeof(IMAGE_DATA), &imageId, err, sizeof(err));
   SelfTestExpect(state, insertImageOk, "DbInsertImage call");
   SelfTestExpect(state, imageId > 0, "DbInsertImage id");
+
+  int documentId = 0;
+  const bool insertDocumentOk =
+      DbInsertDocument(db, "home", "notes.pdf", "application/pdf", PDF_DATA,
+                       sizeof(PDF_DATA), &documentId, err, sizeof(err));
+  SelfTestExpect(state, insertDocumentOk, "DbInsertDocument call");
+  SelfTestExpect(state, documentId > 0, "DbInsertDocument id");
 
   sqlite3_stmt* imageStmt = nullptr;
   char mime[MAX_MIME];
@@ -368,6 +411,20 @@ void SelfTestDatabase(SelfTestState* state) {
     (void)sqlite3_finalize(imageStmt);
   }
 
+  sqlite3_stmt* documentStmt = nullptr;
+  found = false;
+  const bool getDocumentOk =
+      DbGetDocument(db, documentId, mime, sizeof(mime), &blobData, &blobLen,
+                    &documentStmt, &found, err, sizeof(err));
+  SelfTestExpect(state, getDocumentOk, "DbGetDocument call");
+  SelfTestExpect(state, found, "DbGetDocument found row");
+  SelfTestExpect(state, std::strcmp(mime, "application/pdf") == 0,
+                 "DbGetDocument mime");
+  SelfTestExpect(state, blobLen == 8, "DbGetDocument size");
+  if (documentStmt != nullptr) {
+    (void)sqlite3_finalize(documentStmt);
+  }
+
   const bool deleteImageOk =
       DbDeleteImage(db, imageId, "home", err, sizeof(err));
   SelfTestExpect(state, deleteImageOk, "DbDeleteImage call");
@@ -382,10 +439,28 @@ void SelfTestDatabase(SelfTestState* state) {
     (void)sqlite3_finalize(imageStmt);
   }
 
+  const bool deleteDocumentOk =
+      DbDeleteDocument(db, documentId, "home", err, sizeof(err));
+  SelfTestExpect(state, deleteDocumentOk, "DbDeleteDocument call");
+  documentStmt = nullptr;
+  found = true;
+  const bool getDeletedDocumentOk =
+      DbGetDocument(db, documentId, mime, sizeof(mime), &blobData, &blobLen,
+                    &documentStmt, &found, err, sizeof(err));
+  SelfTestExpect(state, getDeletedDocumentOk, "DbGetDocument deleted call");
+  SelfTestExpect(state, !found, "DbDeleteDocument removed row");
+  if (documentStmt != nullptr) {
+    (void)sqlite3_finalize(documentStmt);
+  }
+
   const bool insertImageAgainOk =
       DbInsertImage(db, "home", "tiny.gif", "image/gif", IMAGE_DATA,
                     sizeof(IMAGE_DATA), &imageId, err, sizeof(err));
   SelfTestExpect(state, insertImageAgainOk, "DbInsertImage second call");
+  const bool insertDocumentAgainOk =
+      DbInsertDocument(db, "home", "notes.pdf", "application/pdf", PDF_DATA,
+                       sizeof(PDF_DATA), &documentId, err, sizeof(err));
+  SelfTestExpect(state, insertDocumentAgainOk, "DbInsertDocument second call");
 
   const bool deletePageOk = DbDeletePage(db, "home", err, sizeof(err));
   SelfTestExpect(state, deletePageOk, "DbDeletePage call");
@@ -406,6 +481,18 @@ void SelfTestDatabase(SelfTestState* state) {
   SelfTestExpect(state, !found, "DbDeletePage removed page images");
   if (imageStmt != nullptr) {
     (void)sqlite3_finalize(imageStmt);
+  }
+
+  documentStmt = nullptr;
+  found = true;
+  const bool getDocumentAfterPageDeleteOk =
+      DbGetDocument(db, documentId, mime, sizeof(mime), &blobData, &blobLen,
+                    &documentStmt, &found, err, sizeof(err));
+  SelfTestExpect(state, getDocumentAfterPageDeleteOk,
+                 "DbGetDocument after page delete");
+  SelfTestExpect(state, !found, "DbDeletePage removed page documents");
+  if (documentStmt != nullptr) {
+    (void)sqlite3_finalize(documentStmt);
   }
 
   (void)sqlite3_close(db);
@@ -490,6 +577,10 @@ void SelfTestHttpHandler(SelfTestState* state) {
                  "Edit page includes image list section");
   SelfTestExpect(state,
                  std::strstr(reinterpret_cast<const char*>(response.body),
+                             "Documents for this page") != nullptr,
+                 "Edit page includes document list section");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
                              "delete-button md-insert-image") == nullptr,
                  "Edit page delete controls are not insert targets");
 
@@ -499,11 +590,18 @@ void SelfTestHttpHandler(SelfTestState* state) {
 
   static const unsigned char IMAGE_DATA[] = {0x47U, 0x49U, 0x46U};
   int editImageId = 0;
+  int editDocumentId = 0;
   const bool insertEditImageOk =
       DbInsertImage(db, "home", "tiny.gif", "image/gif", IMAGE_DATA,
                     sizeof(IMAGE_DATA), &editImageId, err, sizeof(err));
   SelfTestExpect(state, insertEditImageOk, "DbInsertImage for edit html");
+  static const unsigned char PDF_DATA[] = {0x25U, 0x50U, 0x44U, 0x46U, 0x2DU};
+  const bool insertEditDocumentOk =
+      DbInsertDocument(db, "home", "tiny.pdf", "application/pdf", PDF_DATA,
+                       sizeof(PDF_DATA), &editDocumentId, err, sizeof(err));
+  SelfTestExpect(state, insertEditDocumentOk, "DbInsertDocument for edit html");
   (void)editImageId;
+  (void)editDocumentId;
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
   (void)CopyString(request.path, sizeof(request.path), "/edit/home");
@@ -530,6 +628,12 @@ void SelfTestHttpHandler(SelfTestState* state) {
                   "class=\"action-button button-secondary md-insert-image\"") !=
           nullptr,
       "Edit page insert image button retains insert class");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "class=\"action-button button-secondary md-insert-document\"") !=
+          nullptr,
+      "Edit page insert document button retains insert class");
   SelfTestExpect(state,
                  std::strstr(reinterpret_cast<const char*>(response.body),
                              "class=\"action-button delete-button\"") != nullptr,
@@ -538,13 +642,190 @@ void SelfTestHttpHandler(SelfTestState* state) {
                  std::strstr(reinterpret_cast<const char*>(response.body),
                              "delete-button md-insert-image") == nullptr,
                  "Edit page delete image button not tagged as insert class");
+  HttpRequest documentGetRequest;
+  HttpResponse documentGetResponse;
+  (void)std::memset(&documentGetRequest, 0, sizeof(documentGetRequest));
+  (void)CopyString(documentGetRequest.method,
+                   sizeof(documentGetRequest.method), "GET");
+  char documentPath[64];
+  (void)std::snprintf(documentPath, sizeof(documentPath), "/document/%d",
+                      editDocumentId);
+  (void)CopyString(documentGetRequest.path, sizeof(documentGetRequest.path),
+                   documentPath);
+  HandleRequest(db, &arena, &documentGetRequest, &documentGetResponse);
+  SelfTestExpect(state, documentGetResponse.status == 200,
+                 "HandleRequest GET /document/<id>");
+  SelfTestExpect(
+      state,
+      std::strcmp(documentGetResponse.contentType, "application/pdf") == 0,
+      "Document response content type");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/documents/new/home");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 200,
+                 "HandleRequest GET /documents/new/home");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "POST");
+  (void)CopyString(request.path, sizeof(request.path), "/images/upload/home");
+  request.headerCount = 1;
+  (void)CopyString(request.headers[0].key, sizeof(request.headers[0].key),
+                   "content-type");
+  (void)CopyString(request.headers[0].value, sizeof(request.headers[0].value),
+                   "multipart/form-data; boundary=img-b");
+  static const char IMAGE_UPLOAD_BODY[] =
+      "--img-b\r\n"
+      "Content-Disposition: form-data; name=\"image\"; filename=\"upload.gif\"\r\n"
+      "Content-Type: image/gif\r\n"
+      "\r\n"
+      "GIF89aXX\r\n"
+      "--img-b--\r\n";
+  request.body = reinterpret_cast<const unsigned char*>(IMAGE_UPLOAD_BODY);
+  request.bodyLen = sizeof(IMAGE_UPLOAD_BODY) - 1U;
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 200,
+                 "HandleRequest POST /images/upload/home");
+  const char* imageSnippet = std::strstr(
+      reinterpret_cast<const char*>(response.body), "](/image/");
+  SelfTestExpect(state, imageSnippet != nullptr,
+                 "Image upload response includes markdown image link");
+  int uploadedImageId = 0;
+  if (imageSnippet != nullptr) {
+    SelfTestExpect(
+        state, std::sscanf(imageSnippet, "](/image/%d)", &uploadedImageId) == 1,
+                   "Image upload response includes parseable image id");
+    SelfTestExpect(state, uploadedImageId > 0,
+                   "Image upload generated positive id");
+  }
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "POST");
+  (void)CopyString(request.path, sizeof(request.path), "/images/upload/missing");
+  request.headerCount = 1;
+  (void)CopyString(request.headers[0].key, sizeof(request.headers[0].key),
+                   "content-type");
+  (void)CopyString(request.headers[0].value, sizeof(request.headers[0].value),
+                   "multipart/form-data; boundary=img-b");
+  request.body = reinterpret_cast<const unsigned char*>(IMAGE_UPLOAD_BODY);
+  request.bodyLen = sizeof(IMAGE_UPLOAD_BODY) - 1U;
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 404,
+                 "HandleRequest rejects /images/upload for missing page");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "POST");
+  (void)CopyString(request.path, sizeof(request.path), "/documents/upload/home");
+  request.headerCount = 1;
+  (void)CopyString(request.headers[0].key, sizeof(request.headers[0].key),
+                   "content-type");
+  (void)CopyString(request.headers[0].value, sizeof(request.headers[0].value),
+                   "multipart/form-data; boundary=pdf-b");
+  static const char DOCUMENT_UPLOAD_BODY[] =
+      "--pdf-b\r\n"
+      "Content-Disposition: form-data; name=\"document\"; filename=\"upload.pdf\"\r\n"
+      "Content-Type: application/pdf\r\n"
+      "\r\n"
+      "%PDF-1.7\r\n"
+      "--pdf-b--\r\n";
+  request.body = reinterpret_cast<const unsigned char*>(DOCUMENT_UPLOAD_BODY);
+  request.bodyLen = sizeof(DOCUMENT_UPLOAD_BODY) - 1U;
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 200,
+                 "HandleRequest POST /documents/upload/home");
+  const char* documentSnippet = std::strstr(
+      reinterpret_cast<const char*>(response.body), "](/document/");
+  SelfTestExpect(state, documentSnippet != nullptr,
+                 "Document upload response includes markdown document link");
+  int uploadedDocumentId = 0;
+  if (documentSnippet != nullptr) {
+    SelfTestExpect(
+        state,
+        std::sscanf(documentSnippet, "](/document/%d)", &uploadedDocumentId) ==
+            1,
+        "Document upload response includes parseable document id");
+    SelfTestExpect(state, uploadedDocumentId > 0,
+                   "Document upload generated positive id");
+  }
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "POST");
+  (void)CopyString(request.path, sizeof(request.path),
+                   "/documents/upload/missing");
+  request.headerCount = 1;
+  (void)CopyString(request.headers[0].key, sizeof(request.headers[0].key),
+                   "content-type");
+  (void)CopyString(request.headers[0].value, sizeof(request.headers[0].value),
+                   "multipart/form-data; boundary=pdf-b");
+  request.body = reinterpret_cast<const unsigned char*>(DOCUMENT_UPLOAD_BODY);
+  request.bodyLen = sizeof(DOCUMENT_UPLOAD_BODY) - 1U;
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 404,
+                 "HandleRequest rejects /documents/upload for missing page");
+
+  char deleteImagePath[64];
+  (void)std::snprintf(deleteImagePath, sizeof(deleteImagePath),
+                      "/images/delete/%d/home", uploadedImageId);
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "POST");
+  (void)CopyString(request.path, sizeof(request.path), deleteImagePath);
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 302,
+                 "HandleRequest POST /images/delete/<id>/home");
+  SelfTestExpect(state, std::strcmp(response.location, "/page/home") == 0,
+                 "Image delete redirects to page");
+  sqlite3_stmt* uploadedImageStmt = nullptr;
+  char uploadedMime[MAX_MIME];
+  const unsigned char* uploadedBlobData = nullptr;
+  int uploadedBlobLen = 0;
+  bool uploadedFound = true;
+  const bool uploadedGetImageOk =
+      DbGetImage(db, uploadedImageId, uploadedMime, sizeof(uploadedMime),
+                 &uploadedBlobData, &uploadedBlobLen, &uploadedImageStmt,
+                 &uploadedFound, err, sizeof(err));
+  SelfTestExpect(state, uploadedGetImageOk,
+                 "DbGetImage after image delete route");
+  SelfTestExpect(state, !uploadedFound, "Image delete route removed row");
+  if (uploadedImageStmt != nullptr) {
+    (void)sqlite3_finalize(uploadedImageStmt);
+  }
+
+  char deleteDocumentPath[64];
+  (void)std::snprintf(deleteDocumentPath, sizeof(deleteDocumentPath),
+                      "/documents/delete/%d/home", uploadedDocumentId);
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "POST");
+  (void)CopyString(request.path, sizeof(request.path), deleteDocumentPath);
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 302,
+                 "HandleRequest POST /documents/delete/<id>/home");
+  SelfTestExpect(state, std::strcmp(response.location, "/page/home") == 0,
+                 "Document delete redirects to page");
+  sqlite3_stmt* uploadedDocumentStmt = nullptr;
+  uploadedFound = true;
+  const bool uploadedGetDocumentOk =
+      DbGetDocument(db, uploadedDocumentId, uploadedMime, sizeof(uploadedMime),
+                    &uploadedBlobData, &uploadedBlobLen, &uploadedDocumentStmt,
+                    &uploadedFound, err, sizeof(err));
+  SelfTestExpect(state, uploadedGetDocumentOk,
+                 "DbGetDocument after document delete route");
+  SelfTestExpect(state, !uploadedFound, "Document delete route removed row");
+  if (uploadedDocumentStmt != nullptr) {
+    (void)sqlite3_finalize(uploadedDocumentStmt);
+  }
 
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
   (void)CopyString(request.path, sizeof(request.path), "/page/home");
   HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "<h2>Documents</h2>") != nullptr,
+                 "View page renders documents section");
   static const unsigned char DELETE_PAGE_TEXT[] = "Delete page";
   static const unsigned char DELETE_IMAGE_ROUTE[] = "/images/delete/";
+  static const unsigned char DELETE_DOCUMENT_ROUTE[] = "/documents/delete/";
   SelfTestExpect(state,
                  FindBytes(response.body, response.bodyLen, DELETE_PAGE_TEXT,
                            sizeof(DELETE_PAGE_TEXT) - 1U) == nullptr,
@@ -553,6 +834,11 @@ void SelfTestHttpHandler(SelfTestState* state) {
                  FindBytes(response.body, response.bodyLen, DELETE_IMAGE_ROUTE,
                            sizeof(DELETE_IMAGE_ROUTE) - 1U) == nullptr,
                  "View page does not render delete image actions");
+  SelfTestExpect(state,
+                 FindBytes(response.body, response.bodyLen,
+                           DELETE_DOCUMENT_ROUTE,
+                           sizeof(DELETE_DOCUMENT_ROUTE) - 1U) == nullptr,
+                 "View page does not render delete document actions");
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "POST");
   (void)CopyString(request.path, sizeof(request.path), "/delete/home");
@@ -632,6 +918,17 @@ void SelfTestHttpHandler(SelfTestState* state) {
   SelfTestExpect(state, badImageIdResponse.status == 400,
                  "HandleRequest rejects /image suffix garbage");
 
+  HttpRequest badDocumentIdRequest;
+  HttpResponse badDocumentIdResponse;
+  (void)std::memset(&badDocumentIdRequest, 0, sizeof(badDocumentIdRequest));
+  (void)CopyString(badDocumentIdRequest.method,
+                   sizeof(badDocumentIdRequest.method), "GET");
+  (void)CopyString(badDocumentIdRequest.path, sizeof(badDocumentIdRequest.path),
+                   "/document/1abc");
+  HandleRequest(db, &arena, &badDocumentIdRequest, &badDocumentIdResponse);
+  SelfTestExpect(state, badDocumentIdResponse.status == 400,
+                 "HandleRequest rejects /document suffix garbage");
+
   HttpRequest badDeleteIdRequest;
   HttpResponse badDeleteIdResponse;
   (void)std::memset(&badDeleteIdRequest, 0, sizeof(badDeleteIdRequest));
@@ -642,6 +939,20 @@ void SelfTestHttpHandler(SelfTestState* state) {
   HandleRequest(db, &arena, &badDeleteIdRequest, &badDeleteIdResponse);
   SelfTestExpect(state, badDeleteIdResponse.status == 400,
                  "HandleRequest rejects /images/delete suffix garbage");
+
+  HttpRequest badDeleteDocumentIdRequest;
+  HttpResponse badDeleteDocumentIdResponse;
+  (void)std::memset(&badDeleteDocumentIdRequest, 0,
+                    sizeof(badDeleteDocumentIdRequest));
+  (void)CopyString(badDeleteDocumentIdRequest.method,
+                   sizeof(badDeleteDocumentIdRequest.method), "POST");
+  (void)CopyString(badDeleteDocumentIdRequest.path,
+                   sizeof(badDeleteDocumentIdRequest.path),
+                   "/documents/delete/1abc/home");
+  HandleRequest(db, &arena, &badDeleteDocumentIdRequest,
+                &badDeleteDocumentIdResponse);
+  SelfTestExpect(state, badDeleteDocumentIdResponse.status == 400,
+                 "HandleRequest rejects /documents/delete suffix garbage");
 
   HttpRequest logoRequest;
   HttpResponse logoResponse;
