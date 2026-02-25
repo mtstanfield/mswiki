@@ -157,6 +157,69 @@ int FindFootnoteIndex(const char ids[][MAX_FOOTNOTE_ID],
 }
 
 /*
+ * Find the next unescaped `*` or `**` run that closes emphasis markup.
+ */
+bool FindClosingAsteriskRun(const char* text,
+                            size_t len,
+                            size_t start,
+                            size_t runLen,
+                            size_t* closeOut) {
+  if (runLen != 1U && runLen != 2U && runLen != 3U) {
+    return false;
+  }
+  for (size_t i = start; i < len; i++) {
+    if (text[i] == '\\' && i + 1U < len) {
+      i++;
+      continue;
+    }
+    if (runLen == 3U) {
+      if (i + 2U < len && text[i] == '*' && text[i + 1U] == '*' &&
+          text[i + 2U] == '*') {
+        *closeOut = i;
+        return true;
+      }
+      continue;
+    }
+    if (runLen == 2U) {
+      if (i + 1U < len && text[i] == '*' && text[i + 1U] == '*') {
+        *closeOut = i;
+        return true;
+      }
+      continue;
+    }
+    if (text[i] == '*') {
+      const bool previousIsStar = (i > start && text[i - 1U] == '*');
+      const bool nextIsStar = (i + 1U < len && text[i + 1U] == '*');
+      if (!previousIsStar && !nextIsStar) {
+        *closeOut = i;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/*
+ * Find closing backtick for an inline code span.
+ */
+bool FindClosingBacktick(const char* text,
+                         size_t len,
+                         size_t start,
+                         size_t* closeOut) {
+  for (size_t i = start; i < len; i++) {
+    if (text[i] == '\\' && i + 1U < len) {
+      i++;
+      continue;
+    }
+    if (text[i] == '`') {
+      *closeOut = i;
+      return true;
+    }
+  }
+  return false;
+}
+
+/*
  * Convert one markdown line into inline HTML with links/notes/images.
  */
 bool WriteInlineMarkdown(TextBuffer* out,
@@ -222,6 +285,84 @@ bool WriteInlineMarkdown(TextBuffer* out,
           i = closeParen + 1U;
           continue;
         }
+      }
+    }
+
+    if (i + 5U < len && text[i] == '*' && text[i + 1U] == '*' &&
+        text[i + 2U] == '*') {
+      size_t close = 0U;
+      if (FindClosingAsteriskRun(text, len, i + 3U, 3U, &close) &&
+          close > i + 3U) {
+        if (!BufferAppend(out, "<strong><em>")) {
+          return false;
+        }
+        if (!WriteInlineMarkdown(out, text + i + 3U, close - (i + 3U),
+                                 footnoteIds, footnoteText, footnoteCount,
+                                 footnoteOrder, nextFootnoteNumber)) {
+          return false;
+        }
+        if (!BufferAppend(out, "</em></strong>")) {
+          return false;
+        }
+        i = close + 3U;
+        continue;
+      }
+    }
+
+    if (i + 2U < len && text[i] == '`') {
+      size_t close = 0U;
+      if (FindClosingBacktick(text, len, i + 1U, &close) && close > i + 1U) {
+        if (!BufferAppend(out, "<code>")) {
+          return false;
+        }
+        if (!BufferAppendEscaped(out, text + i + 1U, close - (i + 1U))) {
+          return false;
+        }
+        if (!BufferAppend(out, "</code>")) {
+          return false;
+        }
+        i = close + 1U;
+        continue;
+      }
+    }
+
+    if (i + 3U < len && text[i] == '*' && text[i + 1U] == '*') {
+      size_t close = 0U;
+      if (FindClosingAsteriskRun(text, len, i + 2U, 2U, &close) &&
+          close > i + 2U) {
+        if (!BufferAppend(out, "<strong>")) {
+          return false;
+        }
+        if (!WriteInlineMarkdown(out, text + i + 2U, close - (i + 2U),
+                                 footnoteIds, footnoteText, footnoteCount,
+                                 footnoteOrder, nextFootnoteNumber)) {
+          return false;
+        }
+        if (!BufferAppend(out, "</strong>")) {
+          return false;
+        }
+        i = close + 2U;
+        continue;
+      }
+    }
+
+    if (i + 2U < len && text[i] == '*') {
+      size_t close = 0U;
+      if (FindClosingAsteriskRun(text, len, i + 1U, 1U, &close) &&
+          close > i + 1U) {
+        if (!BufferAppend(out, "<em>")) {
+          return false;
+        }
+        if (!WriteInlineMarkdown(out, text + i + 1U, close - (i + 1U),
+                                 footnoteIds, footnoteText, footnoteCount,
+                                 footnoteOrder, nextFootnoteNumber)) {
+          return false;
+        }
+        if (!BufferAppend(out, "</em>")) {
+          return false;
+        }
+        i = close + 1U;
+        continue;
       }
     }
 
@@ -430,6 +571,7 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
   size_t lineStart = 0;
   bool inCodeBlock = false;
   bool inList = false;
+  bool inBlockquote = false;
 
   while (lineStart <= len) {
     size_t lineEnd = lineStart;
@@ -461,8 +603,14 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
         }
         inList = false;
       }
+      if (inBlockquote) {
+        if (!BufferAppend(html, "</blockquote>\n")) {
+          return false;
+        }
+        inBlockquote = false;
+      }
       if (!inCodeBlock) {
-        if (!BufferAppend(html, "<pre><code>\n")) {
+        if (!BufferAppend(html, "<pre><code>")) {
           return false;
         }
         inCodeBlock = true;
@@ -486,8 +634,20 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
         }
         inList = false;
       }
+      if (inBlockquote) {
+        if (!BufferAppend(html, "</blockquote>\n")) {
+          return false;
+        }
+        inBlockquote = false;
+      }
     } else if (lineLen > 2U && (line[0] == '-' || line[0] == '*') &&
                line[1] == ' ') {
+      if (inBlockquote) {
+        if (!BufferAppend(html, "</blockquote>\n")) {
+          return false;
+        }
+        inBlockquote = false;
+      }
       if (!inList) {
         if (!BufferAppend(html, "<ul>\n")) {
           return false;
@@ -505,12 +665,42 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
       if (!BufferAppend(html, "</li>\n")) {
         return false;
       }
+    } else if (lineLen > 2U && line[0] == '>' && line[1] == ' ') {
+      if (inList) {
+        if (!BufferAppend(html, "</ul>\n")) {
+          return false;
+        }
+        inList = false;
+      }
+      if (!inBlockquote) {
+        if (!BufferAppend(html, "<blockquote>\n")) {
+          return false;
+        }
+        inBlockquote = true;
+      }
+      if (!BufferAppend(html, "<p>")) {
+        return false;
+      }
+      if (!WriteInlineMarkdown(html, line + 2, lineLen - 2U, footnoteIds,
+                               footnoteText, footnoteCount, footnoteOrder,
+                               &nextFootnoteNumber)) {
+        return false;
+      }
+      if (!BufferAppend(html, "</p>\n")) {
+        return false;
+      }
     } else {
       if (inList) {
         if (!BufferAppend(html, "</ul>\n")) {
           return false;
         }
         inList = false;
+      }
+      if (inBlockquote) {
+        if (!BufferAppend(html, "</blockquote>\n")) {
+          return false;
+        }
+        inBlockquote = false;
       }
 
       size_t hashes = 0;
@@ -559,6 +749,11 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
   }
   if (inCodeBlock) {
     if (!BufferAppend(html, "</code></pre>\n")) {
+      return false;
+    }
+  }
+  if (inBlockquote) {
+    if (!BufferAppend(html, "</blockquote>\n")) {
       return false;
     }
   }

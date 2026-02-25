@@ -102,6 +102,15 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
   }
   const bool rendered = RenderMarkdownToHtml(
       "# Title\nWiki [[Other Page|Label]][^n]\n"
+      "**Bold** and *Italic* text\n"
+      "***Both*** styles\n"
+      "`inline` sample\n"
+      "```\n"
+      "if (a < b) {\n"
+      "  return c;\n"
+      "}\n"
+      "```\n"
+      "> quoted line\n"
       "![Side Image](/image/7)\n"
       "[^n]: Footnote body.\n"
       "* item\n",
@@ -119,6 +128,25 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
                  "Render image as margin figure");
   SelfTestExpect(state, std::strstr(html.data, "class=\"sidenote\"") != nullptr,
                  "Render sidenote");
+  SelfTestExpect(state, std::strstr(html.data, "<strong>Bold</strong>") != nullptr,
+                 "Render bold emphasis");
+  SelfTestExpect(state, std::strstr(html.data, "<em>Italic</em>") != nullptr,
+                 "Render italic emphasis");
+  SelfTestExpect(state,
+                 std::strstr(html.data, "<strong><em>Both</em></strong>") !=
+                     nullptr,
+                 "Render bold+italic emphasis");
+  SelfTestExpect(state, std::strstr(html.data, "<code>inline</code>") != nullptr,
+                 "Render inline code span");
+  SelfTestExpect(
+      state,
+      std::strstr(html.data, "<pre><code>if (a &lt; b) {\n  return c;\n}\n"
+                             "</code></pre>\n") != nullptr,
+      "Render multiline fenced code block");
+  SelfTestExpect(state,
+                 std::strstr(html.data, "<blockquote>\n<p>quoted line</p>\n"
+                                        "</blockquote>\n") != nullptr,
+                 "Render blockquote");
   SelfTestExpect(
       state,
       std::strstr(html.data, "<section class=\"panel footnotes\">") != nullptr,
@@ -382,6 +410,14 @@ void SelfTestHttpHandler(SelfTestState* state) {
                  std::strstr(reinterpret_cast<const char*>(response.body),
                              "data-md-action=\"bold\"") != nullptr,
                  "Edit page includes toolbar action buttons");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "data-md-action=\"codeblock\"") != nullptr,
+                 "Edit page includes fenced code block toolbar button");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "data-md-action=\"quote\"") == nullptr,
+                 "Edit page omits blockquote toolbar button");
   SelfTestExpect(state,
                  std::strstr(reinterpret_cast<const char*>(response.body),
                              "Images for this page") != nullptr,
