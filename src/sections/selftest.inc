@@ -41,8 +41,10 @@ void SelfTestSlugAndCodec(SelfTestState* state) {
                  Slugify("Hello World", slug, sizeof(slug)) &&
                      std::strcmp(slug, "hello-world") == 0,
                  "Slugify basic text");
-  SelfTestExpect(state, IsSafeSlug("good/page_1"),
-                 "IsSafeSlug allows valid slugs");
+  SelfTestExpect(state, IsSafeSlug("good-page_1"),
+                 "IsSafeSlug allows valid single-segment slugs");
+  SelfTestExpect(state, !IsSafeSlug("good/page_1"),
+                 "IsSafeSlug rejects nested path slugs");
   SelfTestExpect(state, !IsSafeSlug("../bad"),
                  "IsSafeSlug rejects parent refs");
 
@@ -797,13 +799,63 @@ void SelfTestHttpHandler(SelfTestState* state) {
 
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
-  (void)CopyString(request.path, sizeof(request.path), "/pages");
+  (void)CopyString(request.path, sizeof(request.path), "/all");
   HandleRequest(db, &arena, &request, &response);
-  SelfTestExpect(state, response.status == 200, "HandleRequest GET /pages");
+  SelfTestExpect(state, response.status == 200, "HandleRequest GET /all");
   SelfTestExpect(state,
                  std::strstr(reinterpret_cast<const char*>(response.body),
                              "All Pages") != nullptr,
                  "Pages response content");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/pages");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 404,
+                 "HandleRequest GET /pages returns 404");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/page/home/b");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 404,
+                 "HandleRequest GET /page/<nested> returns 404");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/edit/home/b");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 404,
+                 "HandleRequest GET /edit/<nested> returns 404");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/raw/home/b");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 404,
+                 "HandleRequest GET /raw/<nested> returns 404");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "POST");
+  (void)CopyString(request.path, sizeof(request.path), "/save/home/b");
+  static const char NESTED_SAVE_BODY[] = "title=Nested&markdown=Nope";
+  request.body = reinterpret_cast<const unsigned char*>(NESTED_SAVE_BODY);
+  request.bodyLen = sizeof(NESTED_SAVE_BODY) - 1U;
+  request.headerCount = 1U;
+  (void)CopyString(request.headers[0].key, sizeof(request.headers[0].key),
+                   "content-type");
+  (void)CopyString(request.headers[0].value, sizeof(request.headers[0].value),
+                   "application/x-www-form-urlencoded");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 404,
+                 "HandleRequest POST /save/<nested> returns 404");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "POST");
+  (void)CopyString(request.path, sizeof(request.path), "/delete/home/b");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 404,
+                 "HandleRequest POST /delete/<nested> returns 404");
 
   const bool createHomeForSearch =
       DbUpsertPage(db, "home", "Home", "Body text for search", err, sizeof(err));
@@ -1281,8 +1333,8 @@ void SelfTestHttpHandler(SelfTestState* state) {
   HandleRequest(db, &arena, &request, &response);
   SelfTestExpect(state, response.status == 302,
                  "HandleRequest POST /delete/home");
-  SelfTestExpect(state, std::strcmp(response.location, "/pages") == 0,
-                 "Delete page redirects to /pages");
+  SelfTestExpect(state, std::strcmp(response.location, "/all") == 0,
+                 "Delete page redirects to /all");
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
   (void)CopyString(request.path, sizeof(request.path), "/page/home");

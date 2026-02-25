@@ -753,7 +753,7 @@ bool Slugify(const char* input, char* slug, size_t slugSize) {
     const bool alphaNum =
         ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
          (ch >= '0' && ch <= '9'));
-    const bool sep = (ch == '-' || ch == '_' || ch == '/' || ch == ' ');
+    const bool sep = (ch == '-' || ch == '_' || ch == ' ');
 
     if (alphaNum) {
       if (slugLen + 2U > slugSize) {
@@ -773,14 +773,13 @@ bool Slugify(const char* input, char* slug, size_t slugSize) {
   }
 
   while (slugLen > 0U &&
-         (slug[slugLen - 1U] == '-' || slug[slugLen - 1U] == '_' ||
-          slug[slugLen - 1U] == '/')) {
+         (slug[slugLen - 1U] == '-' || slug[slugLen - 1U] == '_')) {
     slugLen--;
   }
 
   size_t start = 0;
   while (start < slugLen &&
-         (slug[start] == '-' || slug[start] == '_' || slug[start] == '/')) {
+         (slug[start] == '-' || slug[start] == '_')) {
     start++;
   }
   if (start > 0U) {
@@ -815,12 +814,39 @@ bool IsSafeSlug(const char* slug) {
     const char ch = slug[i];
     const bool ok =
         ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-         (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '/');
+         (ch >= '0' && ch <= '9') || ch == '-' || ch == '_');
     if (!ok) {
       return false;
     }
   }
   return true;
+}
+
+/*
+ * Report whether a URL-encoded route suffix represents a nested path slug.
+ * Nested slugs are not supported, so "/x/a/b" and "/x/a%2Fb" are treated
+ * as not-found route variants rather than bad slug syntax.
+ */
+bool IsNestedSlugSuffix(const char* encoded) {
+  if (std::strchr(encoded, '/') != nullptr) {
+    return true;
+  }
+  const size_t len = std::strlen(encoded);
+  for (size_t i = 0U; i + 2U < len; i++) {
+    if (encoded[i] != '%') {
+      continue;
+    }
+    const int hi = HexDigitValue(encoded[i + 1U]);
+    const int lo = HexDigitValue(encoded[i + 2U]);
+    if (hi < 0 || lo < 0) {
+      continue;
+    }
+    const unsigned int decoded = static_cast<unsigned int>((hi << 4) | lo);
+    if (decoded == static_cast<unsigned int>('/')) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /*
@@ -1309,7 +1335,7 @@ bool BuildPageLayout(const char* title,
   if (!HtmlLine(&writer, "<a href=\"/page/home\">Home</a>")) {
     return false;
   }
-  if (!HtmlLine(&writer, "<a href=\"/pages\">All Pages</a>")) {
+  if (!HtmlLine(&writer, "<a href=\"/all\">All Pages</a>")) {
     return false;
   }
   if (headerLinkHref != nullptr && headerLinkLabel != nullptr) {
@@ -2392,7 +2418,7 @@ void HandleRequest(sqlite3* db,
   }
 
   if (std::strcmp(request->method, "GET") == 0 &&
-      std::strcmp(request->path, "/pages") == 0) {
+      std::strcmp(request->path, "/all") == 0) {
     TextBuffer html;
     char err[256];
     (void)CopyString(err, sizeof(err), "Failed to build pages");
@@ -2554,7 +2580,11 @@ void HandleRequest(sqlite3* db,
       std::strncmp(request->path, "/raw/", 5) == 0) {
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(request->path + 5, slug, sizeof(slug))) {
-      SetError(response, 400, "Invalid page slug");
+      if (IsNestedSlugSuffix(request->path + 5)) {
+        SetError(response, 404, "Not found");
+      } else {
+        SetError(response, 400, "Invalid page slug");
+      }
       return;
     }
 
@@ -2582,7 +2612,11 @@ void HandleRequest(sqlite3* db,
       std::strncmp(request->path, "/edit/", 6) == 0) {
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(request->path + 6, slug, sizeof(slug))) {
-      SetError(response, 400, "Invalid page slug");
+      if (IsNestedSlugSuffix(request->path + 6)) {
+        SetError(response, 404, "Not found");
+      } else {
+        SetError(response, 400, "Invalid page slug");
+      }
       return;
     }
 
@@ -2635,7 +2669,11 @@ void HandleRequest(sqlite3* db,
 
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(request->path + 6, slug, sizeof(slug))) {
-      SetError(response, 400, "Invalid page slug");
+      if (IsNestedSlugSuffix(request->path + 6)) {
+        SetError(response, 404, "Not found");
+      } else {
+        SetError(response, 400, "Invalid page slug");
+      }
       return;
     }
 
@@ -2672,7 +2710,11 @@ void HandleRequest(sqlite3* db,
       std::strncmp(request->path, "/delete/", 8) == 0) {
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(request->path + 8, slug, sizeof(slug))) {
-      SetError(response, 400, "Invalid page slug");
+      if (IsNestedSlugSuffix(request->path + 8)) {
+        SetError(response, 404, "Not found");
+      } else {
+        SetError(response, 400, "Invalid page slug");
+      }
       return;
     }
 
@@ -2681,7 +2723,7 @@ void HandleRequest(sqlite3* db,
       SetError(response, 500, err);
       return;
     }
-    SetRedirect(response, "/pages");
+    SetRedirect(response, "/all");
     return;
   }
 
@@ -2689,7 +2731,11 @@ void HandleRequest(sqlite3* db,
       std::strncmp(request->path, "/images/new/", 12) == 0) {
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(request->path + 12, slug, sizeof(slug))) {
-      SetError(response, 400, "Invalid page slug");
+      if (IsNestedSlugSuffix(request->path + 12)) {
+        SetError(response, 404, "Not found");
+      } else {
+        SetError(response, 400, "Invalid page slug");
+      }
       return;
     }
     PageRecord pageRecord;
@@ -2725,7 +2771,11 @@ void HandleRequest(sqlite3* db,
       std::strncmp(request->path, "/documents/new/", 15) == 0) {
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(request->path + 15, slug, sizeof(slug))) {
-      SetError(response, 400, "Invalid page slug");
+      if (IsNestedSlugSuffix(request->path + 15)) {
+        SetError(response, 404, "Not found");
+      } else {
+        SetError(response, 400, "Invalid page slug");
+      }
       return;
     }
     PageRecord pageRecord;
@@ -2761,7 +2811,11 @@ void HandleRequest(sqlite3* db,
       std::strncmp(request->path, "/images/upload/", 15) == 0) {
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(request->path + 15, slug, sizeof(slug))) {
-      SetError(response, 400, "Invalid page slug");
+      if (IsNestedSlugSuffix(request->path + 15)) {
+        SetError(response, 404, "Not found");
+      } else {
+        SetError(response, 400, "Invalid page slug");
+      }
       return;
     }
     PageRecord pageRecord;
@@ -2818,7 +2872,11 @@ void HandleRequest(sqlite3* db,
       std::strncmp(request->path, "/documents/upload/", 18) == 0) {
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(request->path + 18, slug, sizeof(slug))) {
-      SetError(response, 400, "Invalid page slug");
+      if (IsNestedSlugSuffix(request->path + 18)) {
+        SetError(response, 404, "Not found");
+      } else {
+        SetError(response, 400, "Invalid page slug");
+      }
       return;
     }
     PageRecord pageRecord;
@@ -2897,7 +2955,11 @@ void HandleRequest(sqlite3* db,
 
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(slash + 1U, slug, sizeof(slug))) {
-      SetError(response, 400, "Invalid page slug");
+      if (IsNestedSlugSuffix(slash + 1U)) {
+        SetError(response, 404, "Not found");
+      } else {
+        SetError(response, 400, "Invalid page slug");
+      }
       return;
     }
 
@@ -2942,7 +3004,11 @@ void HandleRequest(sqlite3* db,
 
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(slash + 1U, slug, sizeof(slug))) {
-      SetError(response, 400, "Invalid page slug");
+      if (IsNestedSlugSuffix(slash + 1U)) {
+        SetError(response, 404, "Not found");
+      } else {
+        SetError(response, 400, "Invalid page slug");
+      }
       return;
     }
 
@@ -2967,7 +3033,11 @@ void HandleRequest(sqlite3* db,
       std::strncmp(request->path, "/page/", 6) == 0) {
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(request->path + 6, slug, sizeof(slug))) {
-      SetError(response, 400, "Invalid page slug");
+      if (IsNestedSlugSuffix(request->path + 6)) {
+        SetError(response, 404, "Not found");
+      } else {
+        SetError(response, 400, "Invalid page slug");
+      }
       return;
     }
 

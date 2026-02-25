@@ -12,6 +12,7 @@
 ## Features
 
 - Page CRUD by slug (`/page/<slug>`, `/edit/<slug>`, `/save/<slug>`, `/delete/<slug>`)
+- Page index at `/all` (single-segment slugs only; nested path slugs are not supported)
 - Page search (`/search?q=...`) across page title, slug, and markdown body
 - Wiki links with backlink index:
   - `[[Target Page]]`
