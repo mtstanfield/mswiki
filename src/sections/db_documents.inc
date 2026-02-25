@@ -72,9 +72,8 @@ bool DbAppendDocumentsHtml(sqlite3* db,
       return false;
     }
 
-    char snippet[512];
-    if (std::snprintf(snippet, sizeof(snippet), "[%s](/document/%d)", filename,
-                      id) < 0) {
+    char snippet[1024];
+    if (!BuildDocumentMarkdownSnippet(filename, id, snippet, sizeof(snippet))) {
       (void)sqlite3_finalize(stmt);
       return false;
     }

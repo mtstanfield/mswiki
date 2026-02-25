@@ -632,6 +632,89 @@ bool UrlEncode(const char* in, char* out, size_t outSize) {
 }
 
 /*
+ * Escape markdown-special characters for link/image label text.
+ */
+bool AppendMarkdownLabelEscaped(TextBuffer* buffer,
+                                const char* text,
+                                size_t len) {
+  for (size_t i = 0U; i < len; i++) {
+    const char ch = text[i];
+    if (ch == '\r' || ch == '\n') {
+      if (!BufferAppendChar(buffer, ' ')) {
+        return false;
+      }
+      continue;
+    }
+    const bool needsEscape =
+        (ch == '\\' || ch == '[' || ch == ']' || ch == '(' || ch == ')' ||
+         ch == '`');
+    if (needsEscape) {
+      if (!BufferAppendChar(buffer, '\\')) {
+        return false;
+      }
+    }
+    if (!BufferAppendChar(buffer, ch)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/*
+ * Build `![label](/image/<id>)` markdown snippet for editor insertion.
+ */
+bool BuildImageMarkdownSnippet(const char* filename,
+                               int imageId,
+                               char* out,
+                               size_t outSize) {
+  TextBuffer snippet;
+  snippet.data = out;
+  snippet.length = 0U;
+  snippet.capacity = outSize;
+  if (outSize == 0U) {
+    return false;
+  }
+  out[0] = '\0';
+  if (!BufferAppend(&snippet, "![")) {
+    return false;
+  }
+  if (!AppendMarkdownLabelEscaped(&snippet, filename, std::strlen(filename))) {
+    return false;
+  }
+  if (!BufferAppendFormat(&snippet, "](/image/%d)", imageId)) {
+    return false;
+  }
+  return true;
+}
+
+/*
+ * Build `[label](/document/<id>)` markdown snippet for editor insertion.
+ */
+bool BuildDocumentMarkdownSnippet(const char* filename,
+                                  int documentId,
+                                  char* out,
+                                  size_t outSize) {
+  TextBuffer snippet;
+  snippet.data = out;
+  snippet.length = 0U;
+  snippet.capacity = outSize;
+  if (outSize == 0U) {
+    return false;
+  }
+  out[0] = '\0';
+  if (!BufferAppend(&snippet, "[")) {
+    return false;
+  }
+  if (!AppendMarkdownLabelEscaped(&snippet, filename, std::strlen(filename))) {
+    return false;
+  }
+  if (!BufferAppendFormat(&snippet, "](/document/%d)", documentId)) {
+    return false;
+  }
+  return true;
+}
+
+/*
  * Convert free-form title text into a normalized page slug.
  */
 bool Slugify(const char* input, char* slug, size_t slugSize) {
@@ -1653,7 +1736,7 @@ bool BuildMissingPageHtml(RequestArena* arena,
 }
 
 /*
- * Render full page view including metadata, backlinks, and images.
+ * Render full page view including metadata, backlinks, images, and documents.
  */
 bool BuildViewHtml(sqlite3* db,
                    RequestArena* arena,
@@ -1827,21 +1910,26 @@ bool BuildImageUploadedPage(RequestArena* arena,
   }
 
   char encodedSlug[MAX_PATH];
+  char markdownSnippet[1024];
   if (!UrlEncode(slug, encodedSlug, sizeof(encodedSlug))) {
+    return false;
+  }
+  if (!BuildImageMarkdownSnippet(filename, imageId, markdownSnippet,
+                                 sizeof(markdownSnippet))) {
     return false;
   }
 
   if (!BufferAppend(&content,
                     "<article>\n<h1>Image uploaded</h1>\n"
                     "<p>Use this markdown in your page:</p>\n"
-                    "<pre><code>![")) {
+                    "<pre><code>")) {
     return false;
   }
-  if (!BufferAppendEscaped(&content, filename, std::strlen(filename))) {
+  if (!BufferAppendEscaped(&content, markdownSnippet,
+                           std::strlen(markdownSnippet))) {
     return false;
   }
-  if (!BufferAppendFormat(
-          &content, "](/image/%d)</code></pre>\n<p><a href=\"/edit/", imageId)) {
+  if (!BufferAppend(&content, "</code></pre>\n<p><a href=\"/edit/")) {
     return false;
   }
   if (!BufferAppend(&content, encodedSlug)) {
@@ -1920,22 +2008,26 @@ bool BuildDocumentUploadedPage(RequestArena* arena,
   }
 
   char encodedSlug[MAX_PATH];
+  char markdownSnippet[1024];
   if (!UrlEncode(slug, encodedSlug, sizeof(encodedSlug))) {
+    return false;
+  }
+  if (!BuildDocumentMarkdownSnippet(filename, documentId, markdownSnippet,
+                                    sizeof(markdownSnippet))) {
     return false;
   }
 
   if (!BufferAppend(&content,
                     "<article>\n<h1>Document uploaded</h1>\n"
                     "<p>Use this markdown in your page:</p>\n"
-                    "<pre><code>[")) {
+                    "<pre><code>")) {
     return false;
   }
-  if (!BufferAppendEscaped(&content, filename, std::strlen(filename))) {
+  if (!BufferAppendEscaped(&content, markdownSnippet,
+                           std::strlen(markdownSnippet))) {
     return false;
   }
-  if (!BufferAppendFormat(&content, "](/document/%d)</code></pre>\n"
-                                    "<p><a href=\"/edit/",
-                          documentId)) {
+  if (!BufferAppend(&content, "</code></pre>\n<p><a href=\"/edit/")) {
     return false;
   }
   if (!BufferAppend(&content, encodedSlug)) {

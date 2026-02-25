@@ -1,117 +1,134 @@
 # mswiki
 
-`mswiki` is a lightweight, SQLite-backed markdown wiki server implemented as a single C++ binary.
+`mswiki` is a lightweight, SQLite-backed markdown wiki server implemented as a single C++11 binary.
+
+## Current Scope
+
+- Single-process, single-threaded HTTP server
+- SQLite data store (pages, backlinks, images, documents)
+- Local/home-wiki scale with a minimal dependency/runtime footprint
+- Reverse-proxy-first deployment model for external exposure and auth
 
 ## Features
 
-- Markdown page storage in SQLite (`pages.markdown`)
-- Wiki-style links with backlink index (`[[Page Name]]` and `[[slug|label]]`)
-- Tufte-inspired page styling with right-margin sidenotes and margin figures
-- Footnotes via `[^id]` references and `[^id]: definition` blocks
-- Minimal web UI for browse/edit/create
-- Image uploads stored in SQLite BLOBs
-- Rendered page images are scaled inline as margin figures and open full-size on click
-- Uploaded images can be deleted from the page image list
-- Inline cat emoji favicon (`🐱`) with built-in stylesheet
-- No client-side JavaScript required for core flows
+- Page CRUD by slug (`/page/<slug>`, `/edit/<slug>`, `/save/<slug>`, `/delete/<slug>`)
+- Wiki links with backlink index:
+  - `[[Target Page]]`
+  - `[[target-page|Label]]`
+- Markdown rendering with support for:
+  - Headings (`#`..`######`)
+  - Inline emphasis (`*italic*`, `**bold**`, `***bold+italic***`)
+  - Inline code (`` `code` ``)
+  - Fenced code blocks (triple backticks)
+  - Blockquotes (`> `)
+  - Lists (`- item` or `* item`)
+  - One-level nested sublists (`-- child item` under current list item)
+  - Inline links and images
+  - Footnotes (`[^id]` + `[^id]: text`)
+- Tufte-inspired view styling:
+  - Right-margin sidenotes for footnote references
+  - Right-margin figures for markdown images
+- Binary media in SQLite BLOBs:
+  - Images (`/image/<id>`)
+  - PDF documents (`/document/<id>`)
+- Edit-page media/document controls:
+  - Upload image / upload document
+  - Insert markdown snippet buttons
+  - Delete image / delete document actions with confirmation
+- View-page sections:
+  - Backlinks
+  - Images
+  - Documents
+- Built-in self-test mode (`--self-test`)
+- Distroless nonroot runtime image (Docker)
+
+## Security / Robustness Notes
+
+- Markdown URL scheme filtering blocks unsafe schemes in rendered links/images.
+- Footnote identifiers are allowlisted before use in HTML attributes.
+- Upload handlers verify target page existence before inserting blobs.
+- The server is intentionally single-threaded; run behind a reverse proxy for production exposure.
+- CSRF/auth/session controls are intentionally out of app scope.
 
 ## Build
 
-`cmake` path:
-
 ```sh
 cmake -S . -B build
-cmake --build build
+cmake --build build -j
 ```
 
-Direct compile path:
+### CMake Options
 
-```sh
-c++ -std=c++11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -fno-exceptions -fno-rtti src/main.cpp -lsqlite3 -o mswiki
-```
+- `MSWIKI_STATIC` (default `OFF`): static link mode for `mswiki`
+- `MSWIKI_FUZZING` (default `OFF`): build libFuzzer targets
 
 ## Run
 
 ```sh
-./mswiki --listen 0.0.0.0 --port 8080 --db ./mswiki.db
+./build/mswiki --listen 0.0.0.0 --port 8080 --db ./mswiki.db
 ```
 
 Open [http://localhost:8080](http://localhost:8080).
 
-## Runtime arguments
+### Runtime Arguments
 
 - `--listen <addr>`: IPv4 listen address (default `0.0.0.0`)
-- `--port <port>`: port (default `8080`)
-- `--db <path>`: sqlite database path (default `./mswiki.db`)
-- `--max-body-bytes <bytes>`: maximum accepted request body bytes (default `10485760`)
-- `--self-test`: run the in-process unit/integration self-test suite
+- `--port <port>`: listen port (default `8080`)
+- `--db <path>`: SQLite DB path (default `./mswiki.db`)
+- `--max-body-bytes <bytes>`: max accepted request body size (default `10485760`)
+- `--self-test`: run in-process self-test suite and exit
 
-## Test Suite
-
-Run tests with CTest:
+## Test
 
 ```sh
 cmake -S . -B build
-cmake --build build
+cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Or run directly:
+Or directly:
 
 ```sh
-./mswiki --self-test
+./build/mswiki --self-test
 ```
 
-## Container
+## Docker
 
-Build:
+### App image (local architecture)
 
 ```sh
 docker build -t mswiki:local .
-```
-
-Run with a Docker named volume (recommended):
-
-```sh
 docker volume create mswiki-data
 docker run --rm -p 8080:8080 -v mswiki-data:/data mswiki:local
 ```
 
-Build specifically for amd64 (recommended for deployment to x86_64 servers):
+### App image (amd64 target)
 
 ```sh
 docker buildx build --platform linux/amd64 -t mswiki:amd64 --load .
-```
-
-Run the amd64 image locally:
-
-```sh
 docker volume create mswiki-data
 docker run --rm --platform linux/amd64 -p 8080:8080 -v mswiki-data:/data mswiki:amd64
 ```
 
-Build and run the fuzzing image:
+Runtime image details:
+
+- Base: `gcr.io/distroless/static-debian12:nonroot`
+- User: `65532:65532`
+- DB/data path in container: `/data/mswiki.db`
+
+### Fuzz image
 
 ```sh
 docker buildx build --platform linux/amd64 --target fuzz -t mswiki:fuzz --load .
-docker run --rm --platform linux/amd64 mswiki:fuzz
 ```
 
-The default fuzz target is HTTP request fuzzing and loads
-`fuzz/http_request.dict`.
-The default run also enforces `-timeout=5` seconds per input to avoid
-pathological slow-unit stalls.
-
-The image includes starter seeds in `/corpus/http_request`,
-`/corpus/markdown`, and `/corpus/multipart`.
-
-Run HTTP fuzzing with baked-in corpus:
+HTTP request fuzz target (default entrypoint):
 
 ```sh
 docker run --rm --platform linux/amd64 mswiki:fuzz
 ```
 
-Run the markdown renderer fuzz target:
+Markdown fuzz target:
 
 ```sh
 docker run --rm --platform linux/amd64 \
@@ -120,7 +137,7 @@ docker run --rm --platform linux/amd64 \
   -dict=/src/fuzz/markdown.dict -timeout=5 -max_total_time=3600 /corpus/markdown
 ```
 
-Run the multipart parser fuzz target:
+Multipart fuzz target:
 
 ```sh
 docker run --rm --platform linux/amd64 \
@@ -129,24 +146,19 @@ docker run --rm --platform linux/amd64 \
   -dict=/src/fuzz/multipart.dict -timeout=5 -max_len=65536 -max_total_time=3600 /corpus/multipart
 ```
 
-If you want corpus persistence across runs, mount a host corpus directory:
+## Data Model (SQLite)
 
-```sh
-mkdir -p fuzz-corpus
-cp -R fuzz/seeds/* fuzz-corpus/
-docker run --rm --platform linux/amd64 -v "$PWD/fuzz-corpus:/corpus" mswiki:fuzz
-```
+- `pages`
+  - `slug`, `title`, `markdown`, `created_at`, `updated_at`
+- `page_links`
+  - `from_slug`, `to_slug` (backlink index)
+- `images`
+  - `id`, `page_slug`, `filename`, `mime_type`, `data`, `created_at`
+- `documents`
+  - `id`, `page_slug`, `filename`, `mime_type`, `data`, `created_at`
 
-If the container exits immediately, inspect logs:
+## UI Notes
 
-```sh
-docker logs <container-id>
-```
-
-## Data layout (SQLite)
-
-- `pages`: page slug/title/markdown/timestamps
-- `page_links`: extracted wiki links for backlinks
-- `images`: image metadata and binary data
-
-This schema keeps markdown and related metadata directly readable via SQLite tooling.
+- Editor toolbar and insert buttons use client-side JavaScript for in-place text insertion.
+- Core page rendering and data flows are server-side.
+- The favicon is an inline cat emoji SVG (`🐱`).

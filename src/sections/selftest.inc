@@ -264,7 +264,7 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
 }
 
 /*
- * Validate URL form parsing and multipart image parsing behavior.
+ * Validate URL form parsing and multipart image/document parsing behavior.
  */
 void SelfTestFormAndMultipart(SelfTestState* state) {
   HttpRequest request;
@@ -340,7 +340,7 @@ void SelfTestFormAndMultipart(SelfTestState* state) {
 }
 
 /*
- * Exercise SQLite CRUD flow for pages, backlinks, and image lifecycle.
+ * Exercise SQLite CRUD flow for pages, backlinks, images, and documents.
  */
 void SelfTestDatabase(SelfTestState* state) {
   char dbPath[128];
@@ -598,7 +598,9 @@ void SelfTestHttpHandler(SelfTestState* state) {
 
   static const unsigned char IMAGE_DATA[] = {0x47U, 0x49U, 0x46U};
   int editImageId = 0;
+  int specialImageId = 0;
   int editDocumentId = 0;
+  int specialDocumentId = 0;
   const bool insertEditImageOk =
       DbInsertImage(db, "home", "tiny.gif", "image/gif", IMAGE_DATA,
                     sizeof(IMAGE_DATA), &editImageId, err, sizeof(err));
@@ -608,8 +610,20 @@ void SelfTestHttpHandler(SelfTestState* state) {
       DbInsertDocument(db, "home", "tiny.pdf", "application/pdf", PDF_DATA,
                        sizeof(PDF_DATA), &editDocumentId, err, sizeof(err));
   SelfTestExpect(state, insertEditDocumentOk, "DbInsertDocument for edit html");
+  const bool insertSpecialImageOk =
+      DbInsertImage(db, "home", "edge](name)`tick.gif", "image/gif", IMAGE_DATA,
+                    sizeof(IMAGE_DATA), &specialImageId, err, sizeof(err));
+  SelfTestExpect(state, insertSpecialImageOk,
+                 "DbInsertImage special filename for edit html");
+  const bool insertSpecialDocumentOk = DbInsertDocument(
+      db, "home", "edge](name)`tick.pdf", "application/pdf", PDF_DATA,
+      sizeof(PDF_DATA), &specialDocumentId, err, sizeof(err));
+  SelfTestExpect(state, insertSpecialDocumentOk,
+                 "DbInsertDocument special filename for edit html");
   (void)editImageId;
+  (void)specialImageId;
   (void)editDocumentId;
+  (void)specialDocumentId;
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
   (void)CopyString(request.path, sizeof(request.path), "/edit/home");
@@ -650,6 +664,32 @@ void SelfTestHttpHandler(SelfTestState* state) {
                  std::strstr(reinterpret_cast<const char*>(response.body),
                              "delete-button md-insert-image") == nullptr,
                  "Edit page delete image button not tagged as insert class");
+  char expectedImageSnippet[1024];
+  char expectedDocumentSnippet[1024];
+  const bool expectedImageSnippetOk = BuildImageMarkdownSnippet(
+      "edge](name)`tick.gif", specialImageId, expectedImageSnippet,
+      sizeof(expectedImageSnippet));
+  const bool expectedDocumentSnippetOk = BuildDocumentMarkdownSnippet(
+      "edge](name)`tick.pdf", specialDocumentId, expectedDocumentSnippet,
+      sizeof(expectedDocumentSnippet));
+  SelfTestExpect(state, expectedImageSnippetOk,
+                 "BuildImageMarkdownSnippet special filename");
+  SelfTestExpect(state, expectedDocumentSnippetOk,
+                 "BuildDocumentMarkdownSnippet special filename");
+  if (expectedImageSnippetOk) {
+    SelfTestExpect(
+        state,
+        std::strstr(reinterpret_cast<const char*>(response.body),
+                    expectedImageSnippet) != nullptr,
+        "Edit page insert image snippet escapes markdown-special filename chars");
+  }
+  if (expectedDocumentSnippetOk) {
+    SelfTestExpect(
+        state,
+        std::strstr(reinterpret_cast<const char*>(response.body),
+                    expectedDocumentSnippet) != nullptr,
+        "Edit page insert document snippet escapes markdown-special filename chars");
+  }
   HttpRequest documentGetRequest;
   HttpResponse documentGetResponse;
   (void)std::memset(&documentGetRequest, 0, sizeof(documentGetRequest));
@@ -685,7 +725,8 @@ void SelfTestHttpHandler(SelfTestState* state) {
                    "multipart/form-data; boundary=img-b");
   static const char IMAGE_UPLOAD_BODY[] =
       "--img-b\r\n"
-      "Content-Disposition: form-data; name=\"image\"; filename=\"upload.gif\"\r\n"
+      "Content-Disposition: form-data; name=\"image\"; "
+      "filename=\"edge](name)`tick.gif\"\r\n"
       "Content-Type: image/gif\r\n"
       "\r\n"
       "GIF89aXX\r\n"
@@ -703,9 +744,22 @@ void SelfTestHttpHandler(SelfTestState* state) {
   if (imageSnippet != nullptr) {
     SelfTestExpect(
         state, std::sscanf(imageSnippet, "](/image/%d)", &uploadedImageId) == 1,
-                   "Image upload response includes parseable image id");
+        "Image upload response includes parseable image id");
     SelfTestExpect(state, uploadedImageId > 0,
                    "Image upload generated positive id");
+    char expectedUploadImageSnippet[1024];
+    const bool expectedUploadImageSnippetOk = BuildImageMarkdownSnippet(
+        "edge](name)`tick.gif", uploadedImageId, expectedUploadImageSnippet,
+        sizeof(expectedUploadImageSnippet));
+    SelfTestExpect(state, expectedUploadImageSnippetOk,
+                   "BuildImageMarkdownSnippet upload response");
+    if (expectedUploadImageSnippetOk) {
+      SelfTestExpect(
+          state,
+          std::strstr(reinterpret_cast<const char*>(response.body),
+                      expectedUploadImageSnippet) != nullptr,
+          "Image upload response escapes markdown-special filename chars");
+    }
   }
 
   (void)std::memset(&request, 0, sizeof(request));
@@ -732,7 +786,8 @@ void SelfTestHttpHandler(SelfTestState* state) {
                    "multipart/form-data; boundary=pdf-b");
   static const char DOCUMENT_UPLOAD_BODY[] =
       "--pdf-b\r\n"
-      "Content-Disposition: form-data; name=\"document\"; filename=\"upload.pdf\"\r\n"
+      "Content-Disposition: form-data; name=\"document\"; "
+      "filename=\"edge](name)`tick.pdf\"\r\n"
       "Content-Type: application/pdf\r\n"
       "\r\n"
       "%PDF-1.7\r\n"
@@ -755,6 +810,19 @@ void SelfTestHttpHandler(SelfTestState* state) {
         "Document upload response includes parseable document id");
     SelfTestExpect(state, uploadedDocumentId > 0,
                    "Document upload generated positive id");
+    char expectedUploadDocumentSnippet[1024];
+    const bool expectedUploadDocumentSnippetOk = BuildDocumentMarkdownSnippet(
+        "edge](name)`tick.pdf", uploadedDocumentId, expectedUploadDocumentSnippet,
+        sizeof(expectedUploadDocumentSnippet));
+    SelfTestExpect(state, expectedUploadDocumentSnippetOk,
+                   "BuildDocumentMarkdownSnippet upload response");
+    if (expectedUploadDocumentSnippetOk) {
+      SelfTestExpect(
+          state,
+          std::strstr(reinterpret_cast<const char*>(response.body),
+                      expectedUploadDocumentSnippet) != nullptr,
+          "Document upload response escapes markdown-special filename chars");
+    }
   }
 
   (void)std::memset(&request, 0, sizeof(request));

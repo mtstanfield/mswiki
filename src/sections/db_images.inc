@@ -5,7 +5,7 @@
  */
 
 /*
- * Append page-image list HTML with image links and edit-page actions.
+ * Append page-image list HTML with image links and optional insert/delete actions.
  */
 bool DbAppendImagesHtml(sqlite3* db,
                         const char* slug,
@@ -56,7 +56,9 @@ bool DbAppendImagesHtml(sqlite3* db,
       continue;
     }
 
-    if (!BufferAppendFormat(html, "<li>\n<a href=\"/image/%d\">", id)) {
+    if (!BufferAppendFormat(
+            html, "<li>\n<a href=\"/image/%d\" target=\"_blank\" rel=\"noopener\">",
+            id)) {
       (void)sqlite3_finalize(stmt);
       return false;
     }
@@ -64,9 +66,8 @@ bool DbAppendImagesHtml(sqlite3* db,
       (void)sqlite3_finalize(stmt);
       return false;
     }
-    char snippet[512];
-    if (std::snprintf(snippet, sizeof(snippet), "![%s](/image/%d)", filename,
-                      id) < 0) {
+    char snippet[1024];
+    if (!BuildImageMarkdownSnippet(filename, id, snippet, sizeof(snippet))) {
       (void)sqlite3_finalize(stmt);
       return false;
     }
