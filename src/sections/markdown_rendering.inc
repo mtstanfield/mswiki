@@ -232,6 +232,15 @@ bool WriteInlineMarkdown(TextBuffer* out,
                          int* nextFootnoteNumber) {
   size_t i = 0;
   while (i < len) {
+    if (i + 1U < len && text[i] == '\\' &&
+        (text[i + 1U] == '*' || text[i + 1U] == '`')) {
+      if (!BufferAppendEscaped(out, text + i + 1U, 1U)) {
+        return false;
+      }
+      i += 2U;
+      continue;
+    }
+
     if (i + 5U < len && text[i] == '!' && text[i + 1U] == '[') {
       size_t closeBracket = i + 2U;
       while (closeBracket < len && text[closeBracket] != ']') {

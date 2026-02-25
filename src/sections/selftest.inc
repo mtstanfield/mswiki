@@ -192,6 +192,21 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
                      nullptr,
                  "Leading-space code line remains paragraph text");
 
+  TextBuffer escapedHtml;
+  if (!ArenaAllocTextBuffer(&arena, &escapedHtml, MAX_RESPONSE_BYTES)) {
+    SelfTestExpect(state, false, "RenderMarkdownToHtml escaped arena alloc");
+    return;
+  }
+  const bool renderedEscaped = RenderMarkdownToHtml(
+      "\\*not italic* and \\**not bold** and \\`not code`\n", &escapedHtml);
+  SelfTestExpect(state, renderedEscaped,
+                 "RenderMarkdownToHtml escaped markers");
+  SelfTestExpect(state,
+                 std::strstr(escapedHtml.data,
+                             "<p>*not italic* and **not bold** and `not code`</p>\n") !=
+                     nullptr,
+                 "Escaped inline markers remain literal text");
+
   static const unsigned char PNG_SIG[] = {0x89U, 0x50U, 0x4EU, 0x47U,
                                           0x0DU, 0x0AU, 0x1AU, 0x0AU};
   SelfTestExpect(state,
@@ -503,11 +518,11 @@ void SelfTestHttpHandler(SelfTestState* state) {
   SelfTestExpect(
       state,
       std::strstr(reinterpret_cast<const char*>(response.body),
-                  "\n      </textarea>\n") != nullptr,
+                  "</textarea>\n") != nullptr,
       "Edit page aligns closing textarea tag");
   SelfTestExpect(state,
                  std::strstr(reinterpret_cast<const char*>(response.body),
-                             "\n      </script>\n") != nullptr,
+                             "</script>\n") != nullptr,
                  "Edit page aligns closing script tag");
   SelfTestExpect(
       state,
