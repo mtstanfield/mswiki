@@ -2,5 +2,5 @@
 build/
 fuzz-build/
 mswiki
-FINDINGS.md
+planning/FINDINGS.md
 fuzz-corpus/

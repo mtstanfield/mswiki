@@ -1169,7 +1169,8 @@ bool HtmlAppendContentPretty(HtmlWriter* writer, const char* content) {
 }
 
 /*
- * Build the common HTML page shell with header/nav around content.
+ * Build the common HTML page shell with brand, header search, and nav links
+ * wrapped around page content.
  */
 bool BuildPageLayout(const char* title,
                      const char* content,
@@ -1614,7 +1615,8 @@ bool BuildSimpleSearchExpression(const char tokens[][MAX_SEARCH_TOKEN],
 }
 
 /*
- * Render search page with validation feedback and optional results list.
+ * Render the search page with inline validation feedback and optional results.
+ * Backend query failures are surfaced as user-friendly inline notices.
  */
 bool BuildSearchHtml(sqlite3* db,
                      RequestArena* arena,
