@@ -12,6 +12,7 @@
 ## Features
 
 - Page CRUD by slug (`/page/<slug>`, `/edit/<slug>`, `/save/<slug>`, `/delete/<slug>`)
+- Page search (`/search?q=...`) across page title, slug, and markdown body
 - Wiki links with backlink index:
   - `[[Target Page]]`
   - `[[target-page|Label]]`
@@ -39,6 +40,10 @@
   - Backlinks
   - Images
   - Documents
+- Search behavior:
+  - Minimum query length: 3 characters
+  - Maximum displayed results: 20
+  - Empty/short/invalid queries return inline feedback on the search page
 - Built-in self-test mode (`--self-test`)
 - Distroless nonroot runtime image (Docker)
 
@@ -146,6 +151,8 @@ docker run --rm --platform linux/amd64 \
 
 - `pages`
   - `slug`, `title`, `markdown`, `created_at`, `updated_at`
+- `pages_fts` (derived index)
+  - FTS5 virtual table for `slug`, `title`, `markdown`
 - `page_links`
   - `from_slug`, `to_slug` (backlink index)
 - `images`

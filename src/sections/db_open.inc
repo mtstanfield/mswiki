@@ -63,7 +63,21 @@ bool DbOpen(sqlite3** db, const char* dbPath, char* err, size_t errSize) {
       "created_at TEXT NOT NULL"
       ");"
       "CREATE INDEX IF NOT EXISTS idx_documents_page_slug ON "
-      "documents(page_slug);";
+      "documents(page_slug);"
+      "CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5("
+      "slug, title, markdown"
+      ");"
+      "INSERT INTO pages_fts(rowid, slug, title, markdown) "
+      "SELECT p.id, p.slug, p.title, p.markdown "
+      "FROM pages p "
+      "WHERE NOT EXISTS (SELECT 1 FROM pages_fts f WHERE f.rowid = p.id);"
+      "DELETE FROM pages_fts "
+      "WHERE rowid NOT IN (SELECT id FROM pages);"
+      "INSERT OR REPLACE INTO pages_fts(rowid, slug, title, markdown) "
+      "SELECT p.id, p.slug, p.title, p.markdown "
+      "FROM pages p JOIN pages_fts f ON f.rowid = p.id "
+      "WHERE p.slug <> f.slug OR p.title <> f.title OR "
+      "p.markdown <> f.markdown;";
 
   char* sqliteErr = nullptr;
   if (sqlite3_exec(*db, migrationSql, nullptr, nullptr, &sqliteErr) !=

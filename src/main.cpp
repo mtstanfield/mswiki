@@ -41,6 +41,11 @@ static const size_t MAX_PAGE_MARKDOWN = 512U * 1024U;
 static const size_t MAX_FOOTNOTES = 64U;
 static const size_t MAX_FOOTNOTE_ID = 32U;
 static const size_t MAX_FOOTNOTE_TEXT = 1024U;
+static const size_t MAX_SEARCH_QUERY = 256U;
+static const size_t MAX_SEARCH_TOKEN = 32U;
+static const size_t MAX_SEARCH_TOKENS = 16U;
+static const size_t MAX_SEARCH_SNIPPET = 240U;
+static const int MAX_SEARCH_RESULTS = 20;
 
 typedef struct {
   char listenHost[64];
@@ -129,6 +134,14 @@ void ExtractWikiLinks(const char* markdown,
                       size_t* linkCount,
                       size_t maxLinks);
 bool DbListPagesHtml(sqlite3* db, TextBuffer* html, char* err, size_t errSize);
+bool DbSearchPagesHtml(sqlite3* db,
+                       const char* ftsQuery,
+                       const char tokens[][MAX_SEARCH_TOKEN],
+                       size_t tokenCount,
+                       TextBuffer* html,
+                       int* resultCount,
+                       char* err,
+                       size_t errSize);
 bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html);
 bool DbAppendBacklinksHtml(sqlite3* db,
                            const char* slug,
@@ -1229,6 +1242,23 @@ bool BuildPageLayout(const char* title,
                     "<strong>mswiki</strong></a>\n")) {
     return false;
   }
+  if (!HtmlWriteIndent(&writer)) {
+    return false;
+  }
+  if (!BufferAppend(out,
+                    "<form class=\"header-search\" method=\"get\" "
+                    "action=\"/search\">")) {
+    return false;
+  }
+  if (!BufferAppend(
+          out,
+          "<input type=\"search\" name=\"q\" minlength=\"3\" maxlength=\"256\" "
+          "placeholder=\"Search pages\" aria-label=\"Search pages\">")) {
+    return false;
+  }
+  if (!BufferAppend(out, "<button type=\"submit\">Search</button></form>\n")) {
+    return false;
+  }
   if (!HtmlOpen(&writer, "<nav>")) {
     return false;
   }
@@ -1310,6 +1340,11 @@ void BuildDefaultCss(TextBuffer* css) {
       "nav a{margin-right:12px;color:var(--accent);text-decoration:none;"
       "font-size:.95rem;}"
       "nav a:hover{text-decoration:underline;}"
+      ".header-search{display:flex;align-items:center;gap:8px;margin:0;}"
+      ".header-search input[type=\"search\"]{width:220px;max-width:46vw;"
+      "min-height:34px;padding:6px 10px;border:1px solid var(--line);"
+      "border-radius:6px;background:#fff;font-size:.92rem;}"
+      ".header-search button{min-height:34px;padding:0 12px;border-radius:6px;}"
       "main{max-width:1120px;margin:0 auto;padding:30px 24px 56px;}"
       "article{position:relative;background:var(--paper);border:1px solid "
       "var(--line);border-radius:6px;padding:36px 42% 36px 56px;}"
@@ -1356,7 +1391,11 @@ void BuildDefaultCss(TextBuffer* css) {
       "var(--accent);background:#eef7fb;}"
       ".panel{margin-top:16px;padding-top:12px;border-top:1px solid "
       "var(--line);}"
-      "ul.page-list,ul.backlinks,ul.images,ul.documents{padding-left:18px;}"
+      "ul.page-list,ul.backlinks,ul.images,ul.documents,ul.search-results"
+      "{padding-left:18px;}"
+      ".search-page-form{display:flex;flex-wrap:wrap;gap:8px;align-items:center;"
+      "margin-bottom:12px;}"
+      ".search-page-form input[type=\"search\"]{max-width:560px;}"
       ".content-body li>ul{margin-top:.18rem;margin-bottom:.18rem;}"
       ".content-body ul ul{margin:.12rem 0 .16rem .9rem;padding-left:.95rem;}"
       "pre{background:#f7f3ea;color:var(--text);padding:12px;border-radius:8px;"
@@ -1446,6 +1485,222 @@ bool BuildPagesHtml(sqlite3* db,
 
   BufferReset(page);
   return BuildPageLayout("All Pages", content.data, nullptr, nullptr, page);
+}
+
+/*
+ * Parse one decoded query-string field from request URI query text.
+ */
+typedef enum {
+  QUERY_FIELD_MISSING = 0,
+  QUERY_FIELD_OK = 1,
+  QUERY_FIELD_INVALID = 2
+} QueryFieldStatus;
+
+QueryFieldStatus ParseQueryField(const HttpRequest* request,
+                                 const char* key,
+                                 char* out,
+                                 size_t outSize) {
+  if (out == nullptr || outSize == 0U) {
+    return QUERY_FIELD_INVALID;
+  }
+  out[0] = '\0';
+  if (request == nullptr || key == nullptr || key[0] == '\0') {
+    return QUERY_FIELD_INVALID;
+  }
+  const size_t queryLen = std::strlen(request->query);
+  if (queryLen == 0U) {
+    return QUERY_FIELD_MISSING;
+  }
+
+  char needle[64];
+  if (std::snprintf(needle, sizeof(needle), "%s=", key) < 0) {
+    return QUERY_FIELD_INVALID;
+  }
+
+  size_t pos = 0U;
+  while (pos < queryLen) {
+    size_t end = pos;
+    while (end < queryLen && request->query[end] != '&') {
+      end++;
+    }
+    const size_t tokenLen = end - pos;
+    if (tokenLen >= std::strlen(needle) &&
+        std::strncmp(request->query + pos, needle, std::strlen(needle)) == 0) {
+      const char* encodedValue = request->query + pos + std::strlen(needle);
+      const size_t encodedLen = tokenLen - std::strlen(needle);
+      if (!UrlDecodeStrict(out, outSize, encodedValue, encodedLen, nullptr)) {
+        return QUERY_FIELD_INVALID;
+      }
+      return QUERY_FIELD_OK;
+    }
+    if (end >= queryLen) {
+      break;
+    }
+    pos = end + 1U;
+  }
+  return QUERY_FIELD_MISSING;
+}
+
+/*
+ * Tokenize a simple search query into normalized alphanumeric terms.
+ */
+size_t ExtractSearchTokens(const char* query,
+                           char tokens[][MAX_SEARCH_TOKEN],
+                           size_t maxTokens) {
+  size_t count = 0U;
+  char current[MAX_SEARCH_TOKEN];
+  size_t currentLen = 0U;
+  const size_t len = std::strlen(query);
+  for (size_t i = 0U; i < len; i++) {
+    const int ch = static_cast<unsigned char>(query[i]);
+    const bool isAlphaNum =
+        ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+         (ch >= '0' && ch <= '9'));
+    if (isAlphaNum) {
+      if (currentLen + 1U < sizeof(current)) {
+        current[currentLen++] = static_cast<char>(ToLowerAscii(ch));
+      }
+    } else if (currentLen > 0U) {
+      current[currentLen] = '\0';
+      if (currentLen >= 3U && count < maxTokens) {
+        (void)CopyString(tokens[count], MAX_SEARCH_TOKEN, current);
+        count += 1U;
+      }
+      currentLen = 0U;
+    }
+  }
+  if (currentLen > 0U) {
+    current[currentLen] = '\0';
+    if (currentLen >= 3U && count < maxTokens) {
+      (void)CopyString(tokens[count], MAX_SEARCH_TOKEN, current);
+      count += 1U;
+    }
+  }
+  return count;
+}
+
+/*
+ * Build a safe FTS MATCH expression from normalized search tokens.
+ */
+bool BuildSimpleSearchExpression(const char tokens[][MAX_SEARCH_TOKEN],
+                                 size_t tokenCount,
+                                 char* out,
+                                 size_t outSize) {
+  TextBuffer expr;
+  expr.data = out;
+  expr.length = 0U;
+  expr.capacity = outSize;
+  if (outSize == 0U || tokenCount == 0U) {
+    return false;
+  }
+  out[0] = '\0';
+  for (size_t i = 0U; i < tokenCount; i++) {
+    if (i > 0U) {
+      if (!BufferAppendChar(&expr, ' ')) {
+        return false;
+      }
+    }
+    if (!BufferAppendChar(&expr, '"')) {
+      return false;
+    }
+    if (!BufferAppend(&expr, tokens[i])) {
+      return false;
+    }
+    if (!BufferAppendChar(&expr, '"')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/*
+ * Render search page with validation feedback and optional results list.
+ */
+bool BuildSearchHtml(sqlite3* db,
+                     RequestArena* arena,
+                     const char* query,
+                     const char* ftsQuery,
+                     const char tokens[][MAX_SEARCH_TOKEN],
+                     size_t tokenCount,
+                     const char* feedback,
+                     TextBuffer* page,
+                     char* err,
+                     size_t errSize) {
+  TextBuffer content;
+  if (!ArenaAllocTextBuffer(arena, &content, MAX_RESPONSE_BYTES)) {
+    (void)std::snprintf(err, errSize, "response arena exhausted");
+    return false;
+  }
+
+  if (!BufferAppend(&content, "<article>\n<h1>Search</h1>\n"
+                              "<form class=\"search-page-form\" method=\"get\" "
+                              "action=\"/search\">\n"
+                              "<input type=\"search\" name=\"q\" minlength=\"3\" "
+                              "maxlength=\"256\" placeholder=\"Search pages\" "
+                              "value=\"")) {
+    return false;
+  }
+  if (!BufferAppendEscaped(&content, query, std::strlen(query))) {
+    return false;
+  }
+  if (!BufferAppend(&content,
+                    "\">\n<button type=\"submit\" class=\"action-button\">"
+                    "Search</button>\n</form>\n")) {
+    return false;
+  }
+
+  bool queryExecutionFailed = false;
+  if (feedback != nullptr && feedback[0] != '\0') {
+    if (!BufferAppend(&content, "<p class=\"notice\">")) {
+      return false;
+    }
+    if (!BufferAppendEscaped(&content, feedback, std::strlen(feedback))) {
+      return false;
+    }
+    if (!BufferAppend(&content, "</p>\n")) {
+      return false;
+    }
+  } else if (ftsQuery != nullptr && tokenCount > 0U) {
+    int resultCount = 0;
+    if (!DbSearchPagesHtml(db, ftsQuery, tokens, tokenCount, &content,
+                           &resultCount, err, errSize)) {
+      queryExecutionFailed = true;
+    }
+    if (queryExecutionFailed) {
+      if (!BufferAppend(
+              &content,
+              "<p class=\"notice\">Search is temporarily unavailable. Please "
+              "try again.</p>\n")) {
+        return false;
+      }
+    } else {
+      if (resultCount == 0) {
+        if (!BufferAppend(
+                &content,
+                "<p class=\"meta\">No pages matched this search query.</p>\n")) {
+          return false;
+        }
+      } else {
+        if (!BufferAppendFormat(&content,
+                                "<p class=\"meta\">Showing %d result%s.</p>\n",
+                                resultCount, (resultCount == 1) ? "" : "s")) {
+          return false;
+        }
+      }
+    }
+  } else if (query[0] == '\0') {
+    if (!BufferAppend(&content,
+                      "<p class=\"meta\">Enter at least 3 characters to search "
+                      "page titles, slugs, and markdown.</p>\n")) {
+      return false;
+    }
+  }
+
+  if (!BufferAppend(&content, "</article>\n")) {
+    return false;
+  }
+  BufferReset(page);
+  return BuildPageLayout("Search", content.data, nullptr, nullptr, page);
 }
 
 /*
@@ -2102,6 +2357,62 @@ void HandleRequest(sqlite3* db,
       SetError(response, 500, err);
       return;
     }
+    if (!SetResponseCopy(response, 200, "text/html; charset=utf-8", html.data,
+                         html.length)) {
+      SetError(response, 500, "HTML response too large");
+    }
+    return;
+  }
+
+  if (std::strcmp(request->method, "GET") == 0 &&
+      std::strcmp(request->path, "/search") == 0) {
+    char query[MAX_SEARCH_QUERY + 1U];
+    query[0] = '\0';
+    const QueryFieldStatus queryStatus =
+        ParseQueryField(request, "q", query, sizeof(query));
+    if (queryStatus == QUERY_FIELD_OK) {
+      TrimInPlace(query);
+    }
+
+    const char* feedback = nullptr;
+    char ftsQuery[1024];
+    ftsQuery[0] = '\0';
+    char tokens[MAX_SEARCH_TOKENS][MAX_SEARCH_TOKEN];
+    size_t tokenCount = 0U;
+
+    if (queryStatus == QUERY_FIELD_INVALID) {
+      feedback =
+          "Invalid search query. Please use plain text with at least 3 "
+          "characters.";
+    } else if (query[0] != '\0') {
+      if (std::strlen(query) < 3U) {
+        feedback = "Search query must be at least 3 characters.";
+      } else {
+        tokenCount = ExtractSearchTokens(query, tokens, MAX_SEARCH_TOKENS);
+        if (tokenCount == 0U ||
+            !BuildSimpleSearchExpression(tokens, tokenCount, ftsQuery,
+                                         sizeof(ftsQuery))) {
+          feedback =
+              "Search query must include at least one alphanumeric token with "
+              "3 or more characters.";
+        }
+      }
+    }
+
+    TextBuffer html;
+    if (!ArenaAllocTextBuffer(arena, &html, MAX_RESPONSE_BYTES)) {
+      SetError(response, 500, "Response arena exhausted");
+      return;
+    }
+    char err[256];
+    const char* queryForSearch =
+        (feedback == nullptr && tokenCount > 0U) ? ftsQuery : nullptr;
+    if (!BuildSearchHtml(db, arena, query, queryForSearch, tokens, tokenCount,
+                         feedback, &html, err, sizeof(err))) {
+      SetError(response, 500, err);
+      return;
+    }
+
     if (!SetResponseCopy(response, 200, "text/html; charset=utf-8", html.data,
                          html.length)) {
       SetError(response, 500, "HTML response too large");

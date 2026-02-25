@@ -128,6 +128,39 @@ bool DbUpsertPage(sqlite3* db,
   }
   (void)sqlite3_finalize(stmt);
 
+  const char* ftsDeleteSql =
+      "DELETE FROM pages_fts WHERE rowid = (SELECT id FROM pages WHERE slug = ?)";
+  if (sqlite3_prepare_v2(db, ftsDeleteSql, -1, &stmt, nullptr) != SQLITE_OK) {
+    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
+    (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    return false;
+  }
+  (void)sqlite3_bind_text(stmt, 1, slug, -1, SQLITE_TRANSIENT);
+  if (sqlite3_step(stmt) != SQLITE_DONE) {
+    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
+    (void)sqlite3_finalize(stmt);
+    (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    return false;
+  }
+  (void)sqlite3_finalize(stmt);
+
+  const char* ftsInsertSql =
+      "INSERT INTO pages_fts(rowid, slug, title, markdown) "
+      "SELECT id, slug, title, markdown FROM pages WHERE slug = ?";
+  if (sqlite3_prepare_v2(db, ftsInsertSql, -1, &stmt, nullptr) != SQLITE_OK) {
+    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
+    (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    return false;
+  }
+  (void)sqlite3_bind_text(stmt, 1, slug, -1, SQLITE_TRANSIENT);
+  if (sqlite3_step(stmt) != SQLITE_DONE) {
+    (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
+    (void)sqlite3_finalize(stmt);
+    (void)sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    return false;
+  }
+  (void)sqlite3_finalize(stmt);
+
   const char* deleteSql = "DELETE FROM page_links WHERE from_slug = ?";
   if (sqlite3_prepare_v2(db, deleteSql, -1, &stmt, nullptr) != SQLITE_OK) {
     (void)std::snprintf(err, errSize, "%s", sqlite3_errmsg(db));
@@ -205,6 +238,8 @@ bool DbDeletePage(sqlite3* db, const char* slug, char* err, size_t errSize) {
   static const DeleteStep STEPS[] = {
       {"DELETE FROM page_links WHERE from_slug = ?", 1},
       {"DELETE FROM page_links WHERE to_slug = ?", 1},
+      {"DELETE FROM pages_fts WHERE rowid = (SELECT id FROM pages WHERE slug = ?)",
+       1},
       {"DELETE FROM images WHERE page_slug = ?", 1},
       {"DELETE FROM documents WHERE page_slug = ?", 1},
       {"DELETE FROM pages WHERE slug = ?", 1},
@@ -393,6 +428,199 @@ bool DbAppendBacklinksHtml(sqlite3* db,
     }
   }
 
+  (void)sqlite3_finalize(stmt);
+  return true;
+}
+
+/*
+ * Build a bounded excerpt around the first token hit in markdown text.
+ */
+bool BuildSearchSnippet(const char* markdown,
+                        const char tokens[][MAX_SEARCH_TOKEN],
+                        size_t tokenCount,
+                        char* out,
+                        size_t outSize) {
+  if (out == nullptr || outSize == 0U) {
+    return false;
+  }
+  out[0] = '\0';
+  if (markdown == nullptr || markdown[0] == '\0') {
+    return CopyString(out, outSize, "(no page content)");
+  }
+
+  const size_t markdownLen = std::strlen(markdown);
+  size_t hit = markdownLen;
+  for (size_t i = 0U; i < tokenCount; i++) {
+    const size_t tokenLen = std::strlen(tokens[i]);
+    if (tokenLen == 0U || tokenLen > markdownLen) {
+      continue;
+    }
+    for (size_t pos = 0U; pos + tokenLen <= markdownLen; pos++) {
+      bool match = true;
+      for (size_t j = 0U; j < tokenLen; j++) {
+        if (ToLowerAscii(markdown[pos + j]) != ToLowerAscii(tokens[i][j])) {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
+        if (pos < hit) {
+          hit = pos;
+        }
+        break;
+      }
+    }
+  }
+  if (hit == markdownLen) {
+    hit = 0U;
+  }
+
+  size_t start = 0U;
+  if (hit > 64U) {
+    start = hit - 64U;
+  }
+  size_t end = start + MAX_SEARCH_SNIPPET;
+  if (end > markdownLen) {
+    end = markdownLen;
+  }
+  const bool prefixEllipsis = (start > 0U);
+  const bool suffixEllipsis = (end < markdownLen);
+
+  size_t outLen = 0U;
+  if (prefixEllipsis) {
+    if (outLen + 3U >= outSize) {
+      return false;
+    }
+    (void)std::memcpy(out + outLen, "...", 3U);
+    outLen += 3U;
+  }
+  for (size_t i = start; i < end; i++) {
+    if (outLen + 2U > outSize) {
+      break;
+    }
+    const char ch = markdown[i];
+    out[outLen++] = ((ch == '\n' || ch == '\r' || ch == '\t') ? ' ' : ch);
+  }
+  if (suffixEllipsis && outLen + 4U <= outSize) {
+    (void)std::memcpy(out + outLen, "...", 3U);
+    outLen += 3U;
+  }
+  out[outLen] = '\0';
+  return true;
+}
+
+/*
+ * Append page search results from the page FTS index to HTML output.
+ */
+bool DbSearchPagesHtml(sqlite3* db,
+                       const char* ftsQuery,
+                       const char tokens[][MAX_SEARCH_TOKEN],
+                       size_t tokenCount,
+                       TextBuffer* html,
+                       int* resultCount,
+                       char* err,
+                       size_t errSize) {
+  *resultCount = 0;
+  sqlite3_stmt* stmt = nullptr;
+  const char* sql =
+      "SELECT p.slug, p.title, p.markdown, bm25(pages_fts, 5.0, 3.0, 1.0) AS rank "
+      "FROM pages_fts JOIN pages p ON p.id = pages_fts.rowid "
+      "WHERE pages_fts MATCH ? ORDER BY rank LIMIT 20";
+  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    (void)std::snprintf(err, errSize, "search query preparation failed");
+    return false;
+  }
+  (void)sqlite3_bind_text(stmt, 1, ftsQuery, -1, SQLITE_TRANSIENT);
+
+  bool listOpen = false;
+  bool done = false;
+  while (!done) {
+    const int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_DONE) {
+      done = true;
+      continue;
+    }
+    if (rc != SQLITE_ROW) {
+      (void)std::snprintf(err, errSize, "search query execution failed");
+      (void)sqlite3_finalize(stmt);
+      return false;
+    }
+
+    const char* slug = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    const char* title =
+        reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+    const char* markdown =
+        reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+    if (slug == nullptr || title == nullptr || markdown == nullptr) {
+      continue;
+    }
+    if (!listOpen) {
+      if (!BufferAppend(html, "<ul class=\"search-results\">\n")) {
+        (void)sqlite3_finalize(stmt);
+        return false;
+      }
+      listOpen = true;
+    }
+
+    char encodedSlug[MAX_PATH];
+    if (!UrlEncode(slug, encodedSlug, sizeof(encodedSlug))) {
+      continue;
+    }
+    char snippet[MAX_SEARCH_SNIPPET + 8U];
+    if (!BuildSearchSnippet(markdown, tokens, tokenCount, snippet,
+                            sizeof(snippet))) {
+      continue;
+    }
+
+    if (!BufferAppend(html, "<li>\n<a href=\"/page/")) {
+      (void)sqlite3_finalize(stmt);
+      return false;
+    }
+    if (!BufferAppend(html, encodedSlug)) {
+      (void)sqlite3_finalize(stmt);
+      return false;
+    }
+    if (!BufferAppend(html, "\">")) {
+      (void)sqlite3_finalize(stmt);
+      return false;
+    }
+    if (!BufferAppendEscaped(html, title, std::strlen(title))) {
+      (void)sqlite3_finalize(stmt);
+      return false;
+    }
+    if (!BufferAppend(html, "</a> <span class=\"meta\">(")) {
+      (void)sqlite3_finalize(stmt);
+      return false;
+    }
+    if (!BufferAppendEscaped(html, slug, std::strlen(slug))) {
+      (void)sqlite3_finalize(stmt);
+      return false;
+    }
+    if (!BufferAppend(html, ")</span>\n<p class=\"meta\">")) {
+      (void)sqlite3_finalize(stmt);
+      return false;
+    }
+    if (!BufferAppendEscaped(html, snippet, std::strlen(snippet))) {
+      (void)sqlite3_finalize(stmt);
+      return false;
+    }
+    if (!BufferAppend(html, "</p>\n</li>\n")) {
+      (void)sqlite3_finalize(stmt);
+      return false;
+    }
+
+    *resultCount += 1;
+    if (*resultCount >= MAX_SEARCH_RESULTS) {
+      done = true;
+    }
+  }
+
+  if (listOpen) {
+    if (!BufferAppend(html, "</ul>\n")) {
+      (void)sqlite3_finalize(stmt);
+      return false;
+    }
+  }
   (void)sqlite3_finalize(stmt);
   return true;
 }

@@ -372,6 +372,191 @@ void SelfTestDatabase(SelfTestState* state) {
   static unsigned char arenaStorage[MAX_RESPONSE_BYTES];
   RequestArena arena;
   ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
+
+  char tokens[MAX_SEARCH_TOKENS][MAX_SEARCH_TOKEN];
+  const size_t searchTokenCount =
+      ExtractSearchTokens("home", tokens, MAX_SEARCH_TOKENS);
+  SelfTestExpect(state, searchTokenCount == 1U,
+                 "ExtractSearchTokens home token");
+  char ftsQuery[128];
+  const bool ftsQueryOk = BuildSimpleSearchExpression(
+      tokens, searchTokenCount, ftsQuery, sizeof(ftsQuery));
+  SelfTestExpect(state, ftsQueryOk, "BuildSimpleSearchExpression home token");
+  ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
+  TextBuffer searchHtml;
+  if (!ArenaAllocTextBuffer(&arena, &searchHtml, MAX_RESPONSE_BYTES)) {
+    SelfTestExpect(state, false, "DbSearchPagesHtml arena alloc");
+    (void)sqlite3_close(db);
+    (void)unlink(dbPath);
+    return;
+  }
+  int searchResultCount = 0;
+  const bool searchOk = DbSearchPagesHtml(db, ftsQuery, tokens, searchTokenCount,
+                                          &searchHtml, &searchResultCount, err,
+                                          sizeof(err));
+  SelfTestExpect(state, searchOk, "DbSearchPagesHtml home query");
+  SelfTestExpect(state, searchResultCount > 0, "DbSearchPagesHtml finds home");
+  SelfTestExpect(state,
+                 std::strstr(searchHtml.data, "href=\"/page/home\"") != nullptr,
+                 "DbSearchPagesHtml renders home link");
+
+  char linkTokens[MAX_SEARCH_TOKENS][MAX_SEARCH_TOKEN];
+  const size_t linkTokenCount =
+      ExtractSearchTokens("link", linkTokens, MAX_SEARCH_TOKENS);
+  SelfTestExpect(state, linkTokenCount == 1U, "ExtractSearchTokens link token");
+  char linkQuery[128];
+  const bool linkQueryOk = BuildSimpleSearchExpression(
+      linkTokens, linkTokenCount, linkQuery, sizeof(linkQuery));
+  SelfTestExpect(state, linkQueryOk, "BuildSimpleSearchExpression link token");
+  ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
+  if (!ArenaAllocTextBuffer(&arena, &searchHtml, MAX_RESPONSE_BYTES)) {
+    SelfTestExpect(state, false, "DbSearchPagesHtml link pre-update arena alloc");
+    (void)sqlite3_close(db);
+    (void)unlink(dbPath);
+    return;
+  }
+  searchResultCount = 0;
+  const bool searchLinkBeforeUpdateOk =
+      DbSearchPagesHtml(db, linkQuery, linkTokens, linkTokenCount, &searchHtml,
+                        &searchResultCount, err, sizeof(err));
+  SelfTestExpect(state, searchLinkBeforeUpdateOk,
+                 "DbSearchPagesHtml link pre-update");
+  SelfTestExpect(state, searchResultCount > 0,
+                 "DbSearchPagesHtml link pre-update finds home");
+
+  const bool updateHomeForSearchOk = DbUpsertPage(
+      db, "home", "Home", "Fresh replacement body [[other]] uniquetoken", err,
+      sizeof(err));
+  SelfTestExpect(state, updateHomeForSearchOk,
+                 "DbUpsertPage update maintains FTS sync");
+  ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
+  if (!ArenaAllocTextBuffer(&arena, &searchHtml, MAX_RESPONSE_BYTES)) {
+    SelfTestExpect(state, false,
+                   "DbSearchPagesHtml link post-update arena alloc");
+    (void)sqlite3_close(db);
+    (void)unlink(dbPath);
+    return;
+  }
+  searchResultCount = 0;
+  const bool searchLinkAfterUpdateOk =
+      DbSearchPagesHtml(db, linkQuery, linkTokens, linkTokenCount, &searchHtml,
+                        &searchResultCount, err, sizeof(err));
+  SelfTestExpect(state, searchLinkAfterUpdateOk,
+                 "DbSearchPagesHtml link post-update");
+  SelfTestExpect(state, searchResultCount == 0,
+                 "DbSearchPagesHtml drops removed markdown terms");
+
+  char updatedTokens[MAX_SEARCH_TOKENS][MAX_SEARCH_TOKEN];
+  const size_t updatedTokenCount =
+      ExtractSearchTokens("uniquetoken", updatedTokens, MAX_SEARCH_TOKENS);
+  SelfTestExpect(state, updatedTokenCount == 1U,
+                 "ExtractSearchTokens uniquetoken");
+  char updatedQuery[128];
+  const bool updatedQueryOk =
+      BuildSimpleSearchExpression(updatedTokens, updatedTokenCount, updatedQuery,
+                                  sizeof(updatedQuery));
+  SelfTestExpect(state, updatedQueryOk,
+                 "BuildSimpleSearchExpression uniquetoken");
+  ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
+  if (!ArenaAllocTextBuffer(&arena, &searchHtml, MAX_RESPONSE_BYTES)) {
+    SelfTestExpect(state, false,
+                   "DbSearchPagesHtml uniquetoken arena alloc");
+    (void)sqlite3_close(db);
+    (void)unlink(dbPath);
+    return;
+  }
+  searchResultCount = 0;
+  const bool searchUpdatedTermOk =
+      DbSearchPagesHtml(db, updatedQuery, updatedTokens, updatedTokenCount,
+                        &searchHtml, &searchResultCount, err, sizeof(err));
+  SelfTestExpect(state, searchUpdatedTermOk,
+                 "DbSearchPagesHtml finds updated markdown terms");
+  SelfTestExpect(state, searchResultCount > 0,
+                 "DbSearchPagesHtml updated term returns hit");
+
+  const bool upsertTitleRankOk = DbUpsertPage(
+      db, "title-hit", "zebrarank title", "control body", err, sizeof(err));
+  const bool upsertSlugRankOk = DbUpsertPage(
+      db, "zebrarank-slug", "Slug holder", "control body", err, sizeof(err));
+  const bool upsertBodyRankOk = DbUpsertPage(
+      db, "body-hit", "Body holder", "contains zebrarank in body only", err,
+      sizeof(err));
+  SelfTestExpect(state, upsertTitleRankOk, "DbUpsertPage ranking title row");
+  SelfTestExpect(state, upsertSlugRankOk, "DbUpsertPage ranking slug row");
+  SelfTestExpect(state, upsertBodyRankOk, "DbUpsertPage ranking body row");
+
+  char rankingTokens[MAX_SEARCH_TOKENS][MAX_SEARCH_TOKEN];
+  const size_t rankingTokenCount =
+      ExtractSearchTokens("zebrarank", rankingTokens, MAX_SEARCH_TOKENS);
+  SelfTestExpect(state, rankingTokenCount == 1U,
+                 "ExtractSearchTokens zebrarank");
+  char rankingQuery[128];
+  const bool rankingQueryOk = BuildSimpleSearchExpression(
+      rankingTokens, rankingTokenCount, rankingQuery, sizeof(rankingQuery));
+  SelfTestExpect(state, rankingQueryOk,
+                 "BuildSimpleSearchExpression zebrarank");
+  ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
+  if (!ArenaAllocTextBuffer(&arena, &searchHtml, MAX_RESPONSE_BYTES)) {
+    SelfTestExpect(state, false, "DbSearchPagesHtml ranking arena alloc");
+    (void)sqlite3_close(db);
+    (void)unlink(dbPath);
+    return;
+  }
+  searchResultCount = 0;
+  const bool searchRankingOk =
+      DbSearchPagesHtml(db, rankingQuery, rankingTokens, rankingTokenCount,
+                        &searchHtml, &searchResultCount, err, sizeof(err));
+  SelfTestExpect(state, searchRankingOk, "DbSearchPagesHtml ranking query");
+  const char* titlePos = std::strstr(searchHtml.data, "href=\"/page/title-hit\"");
+  const char* slugPos =
+      std::strstr(searchHtml.data, "href=\"/page/zebrarank-slug\"");
+  const char* bodyPos = std::strstr(searchHtml.data, "href=\"/page/body-hit\"");
+  SelfTestExpect(state, titlePos != nullptr, "Ranking query includes title hit");
+  SelfTestExpect(state, slugPos != nullptr, "Ranking query includes slug hit");
+  SelfTestExpect(state, bodyPos != nullptr, "Ranking query includes body hit");
+  if (bodyPos != nullptr) {
+    const bool titleBeforeBody = (titlePos != nullptr && titlePos < bodyPos);
+    const bool slugBeforeBody = (slugPos != nullptr && slugPos < bodyPos);
+    SelfTestExpect(state, titleBeforeBody || slugBeforeBody,
+                   "Ranking query prefers title/slug ahead of body-only hit");
+  }
+
+  bool capInsertOk = true;
+  for (int i = 0; i < 25; i++) {
+    char slug[64];
+    char title[64];
+    (void)std::snprintf(slug, sizeof(slug), "cap-%d", i);
+    (void)std::snprintf(title, sizeof(title), "Cap %d", i);
+    if (!DbUpsertPage(db, slug, title, "captoken", err, sizeof(err))) {
+      capInsertOk = false;
+      break;
+    }
+  }
+  SelfTestExpect(state, capInsertOk, "DbUpsertPage cap rows");
+  char capTokens[MAX_SEARCH_TOKENS][MAX_SEARCH_TOKEN];
+  const size_t capTokenCount =
+      ExtractSearchTokens("captoken", capTokens, MAX_SEARCH_TOKENS);
+  SelfTestExpect(state, capTokenCount == 1U, "ExtractSearchTokens captoken");
+  char capQuery[128];
+  const bool capQueryOk = BuildSimpleSearchExpression(
+      capTokens, capTokenCount, capQuery, sizeof(capQuery));
+  SelfTestExpect(state, capQueryOk, "BuildSimpleSearchExpression captoken");
+  ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
+  if (!ArenaAllocTextBuffer(&arena, &searchHtml, MAX_RESPONSE_BYTES)) {
+    SelfTestExpect(state, false, "DbSearchPagesHtml cap arena alloc");
+    (void)sqlite3_close(db);
+    (void)unlink(dbPath);
+    return;
+  }
+  searchResultCount = 0;
+  const bool searchCapOk =
+      DbSearchPagesHtml(db, capQuery, capTokens, capTokenCount, &searchHtml,
+                        &searchResultCount, err, sizeof(err));
+  SelfTestExpect(state, searchCapOk, "DbSearchPagesHtml cap query");
+  SelfTestExpect(state, searchResultCount == MAX_SEARCH_RESULTS,
+                 "DbSearchPagesHtml caps results at MAX_SEARCH_RESULTS");
+
+  ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
   TextBuffer backlinksHtml;
   if (!ArenaAllocTextBuffer(&arena, &backlinksHtml, MAX_RESPONSE_BYTES)) {
     SelfTestExpect(state, false, "DbAppendBacklinksHtml arena alloc");
@@ -479,6 +664,19 @@ void SelfTestDatabase(SelfTestState* state) {
   SelfTestExpect(state, getDeletedPageOk, "DbGetPage after delete call");
   SelfTestExpect(state, !found, "DbDeletePage removed page row");
 
+  ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
+  if (!ArenaAllocTextBuffer(&arena, &searchHtml, MAX_RESPONSE_BYTES)) {
+    SelfTestExpect(state, false, "DbSearchPagesHtml post-delete arena alloc");
+  } else {
+    searchResultCount = 0;
+    const bool searchAfterDeleteOk =
+        DbSearchPagesHtml(db, ftsQuery, tokens, searchTokenCount, &searchHtml,
+                          &searchResultCount, err, sizeof(err));
+    SelfTestExpect(state, searchAfterDeleteOk, "DbSearchPagesHtml post-delete");
+    SelfTestExpect(state, searchResultCount == 0,
+                   "DbSearchPagesHtml drops deleted page");
+  }
+
   imageStmt = nullptr;
   found = true;
   const bool getImageAfterPageDeleteOk =
@@ -502,6 +700,34 @@ void SelfTestDatabase(SelfTestState* state) {
   if (documentStmt != nullptr) {
     (void)sqlite3_finalize(documentStmt);
   }
+
+  const int dropFtsRc = sqlite3_exec(db, "DROP TABLE pages_fts;", nullptr,
+                                     nullptr, nullptr);
+  SelfTestExpect(state, dropFtsRc == SQLITE_OK,
+                 "Drop pages_fts for search failure-path test");
+  static unsigned char searchArenaStorage[2U * MAX_RESPONSE_BYTES];
+  RequestArena searchArena;
+  ArenaReset(&searchArena, searchArenaStorage, sizeof(searchArenaStorage));
+  TextBuffer searchPageHtml;
+  if (!ArenaAllocTextBuffer(&searchArena, &searchPageHtml, MAX_RESPONSE_BYTES)) {
+    SelfTestExpect(state, false, "BuildSearchHtml failure-path arena alloc");
+    (void)sqlite3_close(db);
+    (void)unlink(dbPath);
+    return;
+  }
+  char invalidFtsTokens[MAX_SEARCH_TOKENS][MAX_SEARCH_TOKEN];
+  (void)CopyString(invalidFtsTokens[0], MAX_SEARCH_TOKEN, "home");
+  const bool searchPageBuildOk =
+      BuildSearchHtml(db, &searchArena, "home", "\"home\"", invalidFtsTokens,
+                      1U,
+                      nullptr, &searchPageHtml, err, sizeof(err));
+  SelfTestExpect(state, searchPageBuildOk,
+                 "BuildSearchHtml handles FTS execution failures");
+  SelfTestExpect(state,
+                 std::strstr(searchPageHtml.data,
+                             "Search is temporarily unavailable. Please try "
+                             "again.") != nullptr,
+                 "BuildSearchHtml renders friendly FTS error message");
 
   (void)sqlite3_close(db);
   (void)unlink(dbPath);
@@ -537,6 +763,12 @@ void SelfTestHttpHandler(SelfTestState* state) {
       std::strstr(reinterpret_cast<const char*>(response.body),
                   "rel=\"icon\" href=\"data:image/svg+xml") != nullptr,
       "Page layout includes inline favicon");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "<form class=\"header-search\" method=\"get\" "
+                  "action=\"/search\">") != nullptr,
+      "Page layout includes header search form");
 
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
@@ -547,6 +779,61 @@ void SelfTestHttpHandler(SelfTestState* state) {
                  std::strstr(reinterpret_cast<const char*>(response.body),
                              "All Pages") != nullptr,
                  "Pages response content");
+
+  const bool createHomeForSearch =
+      DbUpsertPage(db, "home", "Home", "Body text for search", err, sizeof(err));
+  SelfTestExpect(state, createHomeForSearch, "DbUpsertPage for search route");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/search");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 200, "HandleRequest GET /search");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "Enter at least 3 characters to search page titles, slugs, "
+                  "and markdown.") != nullptr,
+      "Search page guidance for empty query");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/search");
+  (void)CopyString(request.query, sizeof(request.query), "q=ho");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 200,
+                 "HandleRequest GET /search short query");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "Search query must be at least 3 characters.") !=
+                     nullptr,
+                 "Search page reports short-query validation");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/search");
+  (void)CopyString(request.query, sizeof(request.query), "q=home");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 200,
+                 "HandleRequest GET /search valid query");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "href=\"/page/home\"") != nullptr,
+                 "Search page renders matching page link");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/search");
+  (void)CopyString(request.query, sizeof(request.query), "q=abc%00def");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 200,
+                 "HandleRequest GET /search invalid encoding");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "Invalid search query. Please use plain text with at least 3 "
+                  "characters.") != nullptr,
+      "Search page reports invalid query encoding");
 
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
