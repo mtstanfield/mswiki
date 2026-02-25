@@ -710,10 +710,24 @@ void SelfTestHttpHandler(SelfTestState* state) {
 
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/images/new/missing");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 404,
+                 "HandleRequest GET /images/new/<missing> returns 404");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
   (void)CopyString(request.path, sizeof(request.path), "/documents/new/home");
   HandleRequest(db, &arena, &request, &response);
   SelfTestExpect(state, response.status == 200,
                  "HandleRequest GET /documents/new/home");
+
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/documents/new/missing");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 404,
+                 "HandleRequest GET /documents/new/<missing> returns 404");
 
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "POST");
@@ -899,6 +913,14 @@ void SelfTestHttpHandler(SelfTestState* state) {
                  std::strstr(reinterpret_cast<const char*>(response.body),
                              "<h2>Documents</h2>") != nullptr,
                  "View page renders documents section");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "href=\"/image/") != nullptr,
+                 "View page renders image links");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "target=\"_blank\" rel=\"noopener\"") != nullptr,
+                 "View page renders media/document links with new-tab attributes");
   static const unsigned char DELETE_PAGE_TEXT[] = "Delete page";
   static const unsigned char DELETE_IMAGE_ROUTE[] = "/images/delete/";
   static const unsigned char DELETE_DOCUMENT_ROUTE[] = "/documents/delete/";
@@ -942,6 +964,9 @@ void SelfTestHttpHandler(SelfTestState* state) {
   (void)std::memset(&parsedRequest, 0, sizeof(parsedRequest));
   SelfTestExpect(state, !ParseRequestLine("GET / HTTP/2", &parsedRequest),
                  "ParseRequestLine rejects HTTP/2");
+  SelfTestExpect(
+      state, !ParseRequestLine("GET / HTTP/1.1 extra", &parsedRequest),
+      "ParseRequestLine rejects trailing request-line tokens");
   SelfTestExpect(state, ParseRequestLine("GET / HTTP/1.1", &parsedRequest),
                  "ParseRequestLine accepts HTTP/1.1");
 

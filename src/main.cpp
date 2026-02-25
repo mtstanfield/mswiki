@@ -2333,6 +2333,17 @@ void HandleRequest(sqlite3* db,
       SetError(response, 400, "Invalid page slug");
       return;
     }
+    PageRecord pageRecord;
+    bool found = false;
+    char err[256];
+    if (!DbGetPage(db, slug, &pageRecord, &found, err, sizeof(err))) {
+      SetError(response, 500, err);
+      return;
+    }
+    if (!found) {
+      SetError(response, 404, "Page not found");
+      return;
+    }
 
     TextBuffer html;
     if (!ArenaAllocTextBuffer(arena, &html, MAX_RESPONSE_BYTES)) {
@@ -2356,6 +2367,17 @@ void HandleRequest(sqlite3* db,
     char slug[MAX_SLUG];
     if (!DecodeRouteSlugStrict(request->path + 15, slug, sizeof(slug))) {
       SetError(response, 400, "Invalid page slug");
+      return;
+    }
+    PageRecord pageRecord;
+    bool found = false;
+    char err[256];
+    if (!DbGetPage(db, slug, &pageRecord, &found, err, sizeof(err))) {
+      SetError(response, 500, err);
+      return;
+    }
+    if (!found) {
+      SetError(response, 404, "Page not found");
       return;
     }
 

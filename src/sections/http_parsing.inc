@@ -22,8 +22,9 @@ const char* FindHeader(const HttpRequest* request, const char* key) {
  * query.
  */
 bool ParseRequestLine(const char* line, HttpRequest* request) {
-  int matched = std::sscanf(line, "%7s %1023s %15s", request->method,
-                            request->target, request->version);
+  char extra[2];
+  int matched = std::sscanf(line, "%7s %1023s %15s %1s", request->method,
+                            request->target, request->version, extra);
   if (matched != 3) {
     return false;
   }
