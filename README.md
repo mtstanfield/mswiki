@@ -42,14 +42,6 @@
 - Built-in self-test mode (`--self-test`)
 - Distroless nonroot runtime image (Docker)
 
-## Security / Robustness Notes
-
-- Markdown URL scheme filtering blocks unsafe schemes in rendered links/images.
-- Footnote identifiers are allowlisted before use in HTML attributes.
-- Upload handlers verify target page existence before inserting blobs.
-- The server is intentionally single-threaded; run behind a reverse proxy for production exposure.
-- CSRF/auth/session controls are intentionally out of app scope.
-
 ## Build
 
 ```sh
