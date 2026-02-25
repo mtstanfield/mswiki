@@ -111,8 +111,7 @@ bool DbAppendImagesHtml(sqlite3* db,
       }
       if (!BufferAppend(html,
                         "\"><button type=\"submit\" "
-                        "class=\"action-button delete-button "
-                        "md-insert-image\">"
+                        "class=\"action-button delete-button\">"
                         "Delete image</button></form>")) {
         (void)sqlite3_finalize(stmt);
         return false;

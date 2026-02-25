@@ -386,10 +386,43 @@ void SelfTestHttpHandler(SelfTestState* state) {
                  std::strstr(reinterpret_cast<const char*>(response.body),
                              "Images for this page") != nullptr,
                  "Edit page includes image list section");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "delete-button md-insert-image") == nullptr,
+                 "Edit page delete controls are not insert targets");
 
   const bool createHomeForDelete =
       DbUpsertPage(db, "home", "Home", "Body", err, sizeof(err));
   SelfTestExpect(state, createHomeForDelete, "DbUpsertPage for delete route");
+
+  static const unsigned char IMAGE_DATA[] = {0x47U, 0x49U, 0x46U};
+  int editImageId = 0;
+  const bool insertEditImageOk =
+      DbInsertImage(db, "home", "tiny.gif", "image/gif", IMAGE_DATA,
+                    sizeof(IMAGE_DATA), &editImageId, err, sizeof(err));
+  SelfTestExpect(state, insertEditImageOk, "DbInsertImage for edit html");
+  (void)editImageId;
+  (void)std::memset(&request, 0, sizeof(request));
+  (void)CopyString(request.method, sizeof(request.method), "GET");
+  (void)CopyString(request.path, sizeof(request.path), "/edit/home");
+  HandleRequest(db, &arena, &request, &response);
+  SelfTestExpect(state, response.status == 200,
+                 "HandleRequest GET /edit/home with image");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "class=\"action-button button-secondary md-insert-image\"") !=
+          nullptr,
+      "Edit page insert image button retains insert class");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "class=\"action-button delete-button\"") != nullptr,
+                 "Edit page delete image button uses delete class");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "delete-button md-insert-image") == nullptr,
+                 "Edit page delete image button not tagged as insert class");
+
   (void)std::memset(&request, 0, sizeof(request));
   (void)CopyString(request.method, sizeof(request.method), "GET");
   (void)CopyString(request.path, sizeof(request.path), "/page/home");
