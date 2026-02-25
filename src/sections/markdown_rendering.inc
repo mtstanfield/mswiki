@@ -530,6 +530,8 @@ bool WriteInlineMarkdown(TextBuffer* out,
 /*
  * Render supported markdown subset to HTML, including wiki links,
  * sidenotes, and margin images.
+ * Parsing is strict for block markers: headings/lists/quotes/fences/footnote
+ * definitions are recognized only when the marker starts at column 1.
  */
 bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
   const size_t len = std::strlen(markdown);
@@ -570,6 +572,7 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
 
   size_t lineStart = 0;
   bool inCodeBlock = false;
+  bool codeBlockHasLine = false;
   bool inList = false;
   bool inBlockquote = false;
 
@@ -584,7 +587,8 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
       lineLen--;
     }
 
-    const char* line = markdown + lineStart;
+    const char* lineRaw = markdown + lineStart;
+    const char* line = lineRaw;
     char footId[MAX_FOOTNOTE_ID];
     char footText[MAX_FOOTNOTE_TEXT];
     if (ParseFootnoteDefinitionLine(line, lineLen, footId, sizeof(footId),
@@ -614,6 +618,7 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
           return false;
         }
         inCodeBlock = true;
+        codeBlockHasLine = false;
       } else {
         if (!BufferAppend(html, "</code></pre>\n")) {
           return false;
@@ -621,12 +626,15 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
         inCodeBlock = false;
       }
     } else if (inCodeBlock) {
-      if (!BufferAppendEscaped(html, line, lineLen)) {
+      if (codeBlockHasLine) {
+        if (!BufferAppend(html, "\n")) {
+          return false;
+        }
+      }
+      if (!BufferAppendEscaped(html, lineRaw, lineLen)) {
         return false;
       }
-      if (!BufferAppend(html, "\n")) {
-        return false;
-      }
+      codeBlockHasLine = true;
     } else if (lineLen == 0U) {
       if (inList) {
         if (!BufferAppend(html, "</ul>\n")) {
@@ -725,8 +733,8 @@ bool RenderMarkdownToHtml(const char* markdown, TextBuffer* html) {
         if (!BufferAppend(html, "<p>")) {
           return false;
         }
-        if (!WriteInlineMarkdown(html, line, lineLen, footnoteIds, footnoteText,
-                                 footnoteCount, footnoteOrder,
+        if (!WriteInlineMarkdown(html, lineRaw, lineLen, footnoteIds,
+                                 footnoteText, footnoteCount, footnoteOrder,
                                  &nextFootnoteNumber)) {
           return false;
         }

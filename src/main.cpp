@@ -847,6 +847,185 @@ const char* DetectImageMimeFromData(const unsigned char* data, size_t len) {
 }
 
 /*
+ * Lightweight HTML output writer with indentation support.
+ */
+struct HtmlWriter {
+  TextBuffer* out;
+  int indentLevel;
+};
+
+/*
+ * Append indentation spaces for the current HTML nesting level.
+ */
+bool HtmlWriteIndent(HtmlWriter* writer) {
+  for (int i = 0; i < writer->indentLevel; i++) {
+    if (!BufferAppend(writer->out, "  ")) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/*
+ * Append one complete HTML line at current indentation.
+ */
+bool HtmlLine(HtmlWriter* writer, const char* line) {
+  if (!HtmlWriteIndent(writer)) {
+    return false;
+  }
+  if (!BufferAppend(writer->out, line)) {
+    return false;
+  }
+  return BufferAppend(writer->out, "\n");
+}
+
+/*
+ * Append opening HTML tag line and increase nesting indentation.
+ */
+bool HtmlOpen(HtmlWriter* writer, const char* line) {
+  if (!HtmlLine(writer, line)) {
+    return false;
+  }
+  writer->indentLevel += 1;
+  return true;
+}
+
+/*
+ * Decrease nesting indentation and append closing HTML tag line.
+ */
+bool HtmlClose(HtmlWriter* writer, const char* line) {
+  if (writer->indentLevel > 0) {
+    writer->indentLevel -= 1;
+  }
+  return HtmlLine(writer, line);
+}
+
+/*
+ * Return true when a byte-range line contains the given token substring.
+ */
+bool LineContainsToken(const char* line, size_t lineLen, const char* token) {
+  const size_t tokenLen = std::strlen(token);
+  if (tokenLen == 0U || tokenLen > lineLen) {
+    return false;
+  }
+  for (size_t i = 0U; i + tokenLen <= lineLen; i++) {
+    if (std::memcmp(line + i, token, tokenLen) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/*
+ * Append content HTML lines under current indentation without mutating
+ * raw text blocks (for example textarea contents).
+ */
+bool HtmlAppendContentPretty(HtmlWriter* writer, const char* content) {
+  const size_t len = std::strlen(content);
+  size_t start = 0U;
+  int contentIndent = 0;
+  bool inTextarea = false;
+  bool inScript = false;
+  while (start < len) {
+    size_t end = start;
+    while (end < len && content[end] != '\n') {
+      end++;
+    }
+    const char* line = content + start;
+    size_t lineLen = end - start;
+    size_t left = 0U;
+    while (left < lineLen && (line[left] == ' ' || line[left] == '\t')) {
+      left++;
+    }
+    const char* stripped = line + left;
+    size_t strippedLen = lineLen - left;
+    const bool isTagLine = (strippedLen > 0U && stripped[0] == '<');
+    const bool closesTextarea =
+        inTextarea && isTagLine && LineContainsToken(stripped, strippedLen, "</textarea>");
+    const bool closesScript =
+        inScript && isTagLine && LineContainsToken(stripped, strippedLen, "</script>");
+
+    if ((closesTextarea || closesScript) && contentIndent > 0) {
+      contentIndent -= 1;
+    }
+
+    if (!inTextarea && !inScript && isTagLine && strippedLen > 1U &&
+        stripped[1] == '/' && contentIndent > 0) {
+      contentIndent -= 1;
+    }
+
+    if (!inTextarea && !inScript && isTagLine) {
+      for (int i = 0; i < writer->indentLevel + contentIndent; i++) {
+        if (!BufferAppend(writer->out, "  ")) {
+          return false;
+        }
+      }
+    } else if (inScript && !closesScript) {
+      for (int i = 0; i < writer->indentLevel + contentIndent; i++) {
+        if (!BufferAppend(writer->out, "  ")) {
+          return false;
+        }
+      }
+    } else if (closesTextarea || closesScript) {
+      for (int i = 0; i < writer->indentLevel + contentIndent; i++) {
+        if (!BufferAppend(writer->out, "  ")) {
+          return false;
+        }
+      }
+    }
+    if (!inTextarea && !inScript && isTagLine) {
+      line = stripped;
+      lineLen = strippedLen;
+    } else if (closesTextarea || closesScript) {
+      line = stripped;
+      lineLen = strippedLen;
+    }
+    if (lineLen > 0U && !BufferAppendBytes(writer->out, line, lineLen)) {
+      return false;
+    }
+    if (!BufferAppend(writer->out, "\n")) {
+      return false;
+    }
+
+    if (!inTextarea && !inScript && isTagLine) {
+      const bool isClosing = (lineLen > 1U && line[1] == '/');
+      const bool hasInlineClose = LineContainsToken(line, lineLen, "</");
+      const bool selfClosed =
+          (lineLen >= 2U && line[lineLen - 2U] == '/' && line[lineLen - 1U] == '>');
+      const bool isVoid = LineContainsToken(line, lineLen, "<br") ||
+                          LineContainsToken(line, lineLen, "<hr") ||
+                          LineContainsToken(line, lineLen, "<img") ||
+                          LineContainsToken(line, lineLen, "<input") ||
+                          LineContainsToken(line, lineLen, "<meta") ||
+                          LineContainsToken(line, lineLen, "<link");
+      if (!isClosing && !hasInlineClose && !selfClosed && !isVoid) {
+        contentIndent += 1;
+      }
+    }
+
+    if (!inScript && LineContainsToken(line, lineLen, "<textarea") &&
+        !LineContainsToken(line, lineLen, "</textarea>")) {
+      inTextarea = true;
+    }
+    if (inTextarea && LineContainsToken(line, lineLen, "</textarea>")) {
+      inTextarea = false;
+    }
+    if (!inTextarea && LineContainsToken(line, lineLen, "<script") &&
+        !LineContainsToken(line, lineLen, "</script>")) {
+      inScript = true;
+    }
+    if (inScript && LineContainsToken(line, lineLen, "</script>")) {
+      inScript = false;
+    }
+    if (end == len) {
+      break;
+    }
+    start = end + 1U;
+  }
+  return true;
+}
+
+/*
  * Build the common HTML page shell with header/nav around content.
  */
 bool BuildPageLayout(const char* title,
@@ -854,40 +1033,85 @@ bool BuildPageLayout(const char* title,
                      const char* headerLinkHref,
                      const char* headerLinkLabel,
                      TextBuffer* out) {
-  if (!BufferAppend(out,
-                    "<!doctype html>\n"
-                    "<html>\n"
-                    "<head>\n"
-                    "<meta charset=\"utf-8\">\n"
-                    "<meta name=\"viewport\" "
-                    "content=\"width=device-width,initial-scale=1\">\n"
-                    "<title>")) {
+  HtmlWriter writer;
+  writer.out = out;
+  writer.indentLevel = 0;
+
+  if (!HtmlLine(&writer, "<!doctype html>")) {
+    return false;
+  }
+  if (!HtmlOpen(&writer, "<html>")) {
+    return false;
+  }
+  if (!HtmlOpen(&writer, "<head>")) {
+    return false;
+  }
+  if (!HtmlLine(&writer, "<meta charset=\"utf-8\">")) {
+    return false;
+  }
+  if (!HtmlLine(&writer,
+                "<meta name=\"viewport\" "
+                "content=\"width=device-width,initial-scale=1\">")) {
+    return false;
+  }
+  if (!HtmlWriteIndent(&writer)) {
+    return false;
+  }
+  if (!BufferAppend(out, "<title>")) {
     return false;
   }
   if (!BufferAppendEscaped(out, title, std::strlen(title))) {
     return false;
   }
-  if (!BufferAppend(out,
-                    " - mswiki</title>\n"
-                    "<link rel=\"icon\" href=\"data:image/svg+xml,%3Csvg%20"
-                    "xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20"
-                    "100%20100'%3E%3Ctext%20y='.9em'%20font-size='90'%3E%F0"
-                    "%9F%90%B1%3C/text%3E%3C/svg%3E\">\n"
-                    "<link rel=\"stylesheet\" href=\"/style.css\">\n"
-                    "</head>\n"
-                    "<body>\n"
-                    "<header>\n"
-                    "<div class=\"header-inner\"><a class=\"brand\" "
-                    "href=\"/page/home\">")) {
+  if (!BufferAppend(out, " - mswiki</title>\n")) {
+    return false;
+  }
+  if (!HtmlLine(&writer,
+                "<link rel=\"icon\" "
+                "href=\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/"
+                "2000/svg'%20viewBox='0%200%20"
+                "100%20100'%3E%3Ctext%20y='.9em'%20font-size='90'%3E%F0"
+                "%9F%90%B1%3C/text%3E%3C/svg%3E\">")) {
+    return false;
+  }
+  if (!HtmlLine(&writer, "<link rel=\"stylesheet\" href=\"/style.css\">")) {
+    return false;
+  }
+  if (!HtmlClose(&writer, "</head>")) {
+    return false;
+  }
+  if (!HtmlOpen(&writer, "<body>")) {
+    return false;
+  }
+  if (!HtmlOpen(&writer, "<header>")) {
+    return false;
+  }
+  if (!HtmlOpen(&writer, "<div class=\"header-inner\">")) {
+    return false;
+  }
+  if (!HtmlWriteIndent(&writer)) {
+    return false;
+  }
+  if (!BufferAppend(out, "<a class=\"brand\" href=\"/page/home\">")) {
     return false;
   }
   if (!BufferAppend(out,
-                    "<strong>mswiki</strong></a><nav>"
-                    "<a href=\"/page/home\">Home</a>"
-                    "<a href=\"/pages\">All Pages</a>")) {
+                    "<strong>mswiki</strong></a>\n")) {
+    return false;
+  }
+  if (!HtmlOpen(&writer, "<nav>")) {
+    return false;
+  }
+  if (!HtmlLine(&writer, "<a href=\"/page/home\">Home</a>")) {
+    return false;
+  }
+  if (!HtmlLine(&writer, "<a href=\"/pages\">All Pages</a>")) {
     return false;
   }
   if (headerLinkHref != nullptr && headerLinkLabel != nullptr) {
+    if (!HtmlWriteIndent(&writer)) {
+      return false;
+    }
     if (!BufferAppend(out, "<a href=\"")) {
       return false;
     }
@@ -900,17 +1124,32 @@ bool BuildPageLayout(const char* title,
     if (!BufferAppendEscaped(out, headerLinkLabel, std::strlen(headerLinkLabel))) {
       return false;
     }
-    if (!BufferAppend(out, "</a>")) {
+    if (!BufferAppend(out, "</a>\n")) {
       return false;
     }
   }
-  if (!BufferAppend(out, "</nav></div>\n</header>\n<main>\n")) {
+  if (!HtmlClose(&writer, "</nav>")) {
     return false;
   }
-  if (!BufferAppend(out, content)) {
+  if (!HtmlClose(&writer, "</div>")) {
     return false;
   }
-  if (!BufferAppend(out, "\n</main>\n</body>\n</html>\n")) {
+  if (!HtmlClose(&writer, "</header>")) {
+    return false;
+  }
+  if (!HtmlOpen(&writer, "<main>")) {
+    return false;
+  }
+  if (!HtmlAppendContentPretty(&writer, content)) {
+    return false;
+  }
+  if (!HtmlClose(&writer, "</main>")) {
+    return false;
+  }
+  if (!HtmlClose(&writer, "</body>")) {
+    return false;
+  }
+  if (!HtmlClose(&writer, "</html>")) {
     return false;
   }
 
@@ -947,6 +1186,7 @@ void BuildDefaultCss(TextBuffer* css) {
       ".content-body{max-width:66ch;}"
       "h1,h2,h3,h4{font-weight:500;line-height:1.25;letter-spacing:-.01em;}"
       "p,li{font-size:1.08rem;}"
+      ".content-body p,.content-body li{white-space:pre-wrap;}"
       "a{color:var(--accent);}"
       "textarea,input[type=\"text\"]{width:100%;border:1px solid "
       "var(--line);border-radius:4px;padding:10px;font:inherit;background:#fff;"
@@ -1029,10 +1269,11 @@ bool BuildPagesHtml(sqlite3* db,
   }
 
   if (!BufferAppend(&content,
-                    "<article><h1>All Pages</h1>"
+                    "<article>\n"
+                    "<h1>All Pages</h1>\n"
                     "<p class=\"meta\">To create a page, edit the URL to "
                     "<code>/edit/your-page-slug</code> (for example "
-                    "<code>/edit/project-notes</code>), then save.</p>")) {
+                    "<code>/edit/project-notes</code>), then save.</p>\n")) {
     return false;
   }
 
@@ -1048,22 +1289,22 @@ bool BuildPagesHtml(sqlite3* db,
   if (items.length == 0U) {
     if (!BufferAppend(&content,
                       "<p class=\"notice\">No pages exist yet. Start with <a "
-                      "href=\"/edit/home\">Home</a>.</p>")) {
+                      "href=\"/edit/home\">Home</a>.</p>\n")) {
       return false;
     }
   } else {
-    if (!BufferAppend(&content, "<ul class=\"page-list\">")) {
+    if (!BufferAppend(&content, "<ul class=\"page-list\">\n")) {
       return false;
     }
     if (!BufferAppend(&content, items.data)) {
       return false;
     }
-    if (!BufferAppend(&content, "</ul>")) {
+    if (!BufferAppend(&content, "</ul>\n")) {
       return false;
     }
   }
 
-  if (!BufferAppend(&content, "</article>")) {
+  if (!BufferAppend(&content, "</article>\n")) {
     return false;
   }
 
@@ -1078,28 +1319,28 @@ bool AppendEditorToolbarHtml(TextBuffer* content) {
   return BufferAppend(
       content,
       "<div id=\"markdown-toolbar\" class=\"editor-toolbar\" role=\"toolbar\" "
-      "aria-label=\"Markdown formatting\">"
+      "aria-label=\"Markdown formatting\">\n"
       "<button type=\"button\" class=\"md-tool\" data-md-action=\"h1\" "
-      "aria-label=\"Heading 1\">H1 Heading</button>"
+      "aria-label=\"Heading 1\">H1 Heading</button>\n"
       "<button type=\"button\" class=\"md-tool\" data-md-action=\"h2\" "
-      "aria-label=\"Heading 2\">H2 Heading</button>"
+      "aria-label=\"Heading 2\">H2 Heading</button>\n"
       "<button type=\"button\" class=\"md-tool\" data-md-action=\"bold\" "
-      "aria-label=\"Bold\">Bold</button>"
+      "aria-label=\"Bold\">Bold</button>\n"
       "<button type=\"button\" class=\"md-tool\" data-md-action=\"italic\" "
-      "aria-label=\"Italic\">Italic</button>"
+      "aria-label=\"Italic\">Italic</button>\n"
       "<button type=\"button\" class=\"md-tool\" data-md-action=\"link\" "
-      "aria-label=\"Link\">Link</button>"
+      "aria-label=\"Link\">Link</button>\n"
       "<button type=\"button\" class=\"md-tool\" data-md-action=\"wiki\" "
-      "aria-label=\"Wiki Link\">[[Wiki]]</button>"
+      "aria-label=\"Wiki Link\">[[Wiki]]</button>\n"
       "<button type=\"button\" class=\"md-tool\" data-md-action=\"code\" "
-      "aria-label=\"Inline Code\">&lt;/&gt; Code</button>"
+      "aria-label=\"Inline Code\">&lt;/&gt; Code</button>\n"
       "<button type=\"button\" class=\"md-tool\" data-md-action=\"codeblock\" "
-      "aria-label=\"Code Block\">Code Block</button>"
+      "aria-label=\"Code Block\">Code Block</button>\n"
       "<button type=\"button\" class=\"md-tool\" data-md-action=\"list\" "
-      "aria-label=\"List\">List</button>"
+      "aria-label=\"List\">List</button>\n"
       "<button type=\"button\" class=\"md-tool\" data-md-action=\"footnote\" "
-      "aria-label=\"Footnote\">Footnote</button>"
-      "</div>");
+      "aria-label=\"Footnote\">Footnote</button>\n"
+      "</div>\n");
 }
 
 /*
@@ -1108,15 +1349,15 @@ bool AppendEditorToolbarHtml(TextBuffer* content) {
 bool AppendEditorToolbarScript(TextBuffer* content) {
   return BufferAppend(
       content,
-      "<script>(function(){'use strict';"
+      "<script>\n(function(){'use strict';"
       "function clamp(value,min,max){if(value<min){return min;}if(value>max){"
       "return max;}return value;}"
       "function findActionNode(node,root){while(node&&node!==root){if("
       "node.nodeType===1&&node.getAttribute('data-md-action')){return node;}"
       "node=node.parentNode;}return null;}"
       "function prefixLines(text,prefix){if(text.length===0){return prefix;}"
-      "var parts=text.split('\\\\n');for(var i=0;i<parts.length;i++){parts[i]="
-      "prefix+parts[i];}return parts.join('\\\\n');}"
+      "var parts=text.split('\\n');for(var i=0;i<parts.length;i++){parts[i]="
+      "prefix+parts[i];}return parts.join('\\n');}"
       "var editor=document.getElementById('markdown');"
       "var toolbar=document.getElementById('markdown-toolbar');"
       "if(!editor||!toolbar){return;}"
@@ -1131,9 +1372,9 @@ bool AppendEditorToolbarScript(TextBuffer* content) {
       "placeholder:'link text'},"
       "wiki:{mode:'wrap',prefix:'[[',suffix:']]',placeholder:'Target Page'},"
       "code:{mode:'wrap',prefix:'`',suffix:'`',placeholder:'code'},"
-      "codeblock:{mode:'insert',insertText:'```\\\\ncode block\\\\n```'},"
+      "codeblock:{mode:'insert',insertText:'```\\ncode block\\n```'},"
       "list:{mode:'line-prefix',prefix:'- ',placeholder:'list item'},"
-      "footnote:{mode:'insert',insertText:'[^note]\\\\n\\\\n[^note]: note "
+      "footnote:{mode:'insert',insertText:'[^note]\\n\\n[^note]: note "
       "text'}};"
       "function applyReplacement(start,end,replacement,cursorPos){"
       "if(typeof editor.setRangeText==='function'){editor.setRangeText("
@@ -1172,8 +1413,8 @@ bool AppendEditorToolbarScript(TextBuffer* content) {
       "return;}var start=clamp(editor.selectionStart,0,editor.value.length);"
       "var end=clamp(editor.selectionEnd,0,editor.value.length);if(end<start){"
       "var tmp=start;start=end;end=tmp;}applyReplacement(start,end,snippet,"
-      "start+snippet.length);return;}target=target.parentNode;}});})();"
-      "</script>");
+      "start+snippet.length);return;}target=target.parentNode;}});})();\n"
+      "</script>\n");
 }
 
 /*
@@ -1198,13 +1439,13 @@ bool BuildEditHtml(sqlite3* db,
     return false;
   }
 
-  if (!BufferAppend(&content, "<article><h1>Edit ")) {
+  if (!BufferAppend(&content, "<article>\n<h1>Edit ")) {
     return false;
   }
   if (!BufferAppendEscaped(&content, slug, std::strlen(slug))) {
     return false;
   }
-  if (!BufferAppend(&content, "</h1><form method=\"post\" action=\"/save/")) {
+  if (!BufferAppend(&content, "</h1>\n<form method=\"post\" action=\"/save/")) {
     return false;
   }
   if (!BufferAppend(&content, encodedSlug)) {
@@ -1212,7 +1453,7 @@ bool BuildEditHtml(sqlite3* db,
   }
   if (!BufferAppend(
           &content,
-          "\"><label for=\"title\">Title</label><br>"
+          "\">\n<label for=\"title\">Title</label><br>\n"
           "<input type=\"text\" id=\"title\" name=\"title\" value=\"")) {
     return false;
   }
@@ -1221,7 +1462,7 @@ bool BuildEditHtml(sqlite3* db,
   }
   if (!BufferAppend(
           &content,
-          "\" required><br><br><label for=\"markdown\">Markdown</label><br>")) {
+          "\" required><br><br>\n<label for=\"markdown\">Markdown</label><br>\n")) {
     return false;
   }
   if (!AppendEditorToolbarHtml(&content)) {
@@ -1234,17 +1475,17 @@ bool BuildEditHtml(sqlite3* db,
   if (!BufferAppendEscaped(&content, markdown, std::strlen(markdown))) {
     return false;
   }
-  if (!BufferAppend(&content, "</textarea>")) {
+  if (!BufferAppend(&content, "</textarea>\n")) {
     return false;
   }
   if (!BufferAppend(
           &content,
-          "<br><p class=\"meta\">Wiki links: "
-          "<code>[[Target Page]]</code> or <code>[[target|label]]</code>.</p>"
+          "<br>\n<p class=\"meta\">Wiki links: "
+          "<code>[[Target Page]]</code> or <code>[[target|label]]</code>.</p>\n"
           "<p class=\"meta\">Footnotes: <code>[^id]</code> in text and "
-          "<code>[^id]: note</code> definitions.</p>"
-          "<div class=\"form-actions\">"
-          "<button type=\"submit\" class=\"action-button\">Save</button>"
+          "<code>[^id]: note</code> definitions.</p>\n"
+          "\n<div class=\"form-actions\">"
+          "\n<button type=\"submit\" class=\"action-button\">Save</button>\n"
           "<a class=\"button-link button-secondary\" href=\"/page/")) {
     return false;
   }
@@ -1252,7 +1493,7 @@ bool BuildEditHtml(sqlite3* db,
     return false;
   }
   if (!BufferAppend(&content,
-                    "\">Cancel</a></div></form> "
+                    "\">Cancel</a>\n</div>\n</form>\n"
                     "<form class=\"inline-delete\" method=\"post\" "
                     "onsubmit=\"return confirm('Delete this page and all "
                     "related images and links?');\" "
@@ -1263,37 +1504,37 @@ bool BuildEditHtml(sqlite3* db,
     return false;
   }
   if (!BufferAppend(&content,
-                    "\"><div class=\"form-actions\"><button type=\"submit\" "
-                    "class=\"action-button delete-button\">Delete page</button>"
-                    " <a class=\"button-link button-secondary\" href=\"/raw/")) {
+                    "\">\n<div class=\"form-actions\">\n<button type=\"submit\" "
+                    "class=\"action-button delete-button\">Delete page</button>\n"
+                    "<a class=\"button-link button-secondary\" href=\"/raw/")) {
     return false;
   }
   if (!BufferAppend(&content, encodedSlug)) {
     return false;
   }
   if (!BufferAppend(&content,
-                    "\">View raw markdown</a></div></form><section "
-                    "class=\"panel\">"
-                    "<h2>Images for this page</h2><p><a class=\"button-link "
+                    "\">View raw markdown</a>\n</div>\n</form>\n<section "
+                    "class=\"panel\">\n"
+                    "<h2>Images for this page</h2>\n<p><a class=\"button-link "
                     "button-secondary\" href=\"/images/new/")) {
     return false;
   }
   if (!BufferAppend(&content, encodedSlug)) {
     return false;
   }
-  if (!BufferAppend(&content, "\">Upload image</a></p>")) {
+  if (!BufferAppend(&content, "\">Upload image</a></p>\n")) {
     return false;
   }
   if (!DbAppendImagesHtml(db, slug, &content, true, err, errSize)) {
     return false;
   }
-  if (!BufferAppend(&content, "</section>")) {
+  if (!BufferAppend(&content, "</section>\n")) {
     return false;
   }
   if (!AppendEditorToolbarScript(&content)) {
     return false;
   }
-  if (!BufferAppend(&content, "</article>")) {
+  if (!BufferAppend(&content, "</article>\n")) {
     return false;
   }
 
@@ -1317,21 +1558,21 @@ bool BuildMissingPageHtml(RequestArena* arena,
     return false;
   }
 
-  if (!BufferAppend(&content, "<article><h1>")) {
+  if (!BufferAppend(&content, "<article>\n<h1>")) {
     return false;
   }
   if (!BufferAppendEscaped(&content, slug, std::strlen(slug))) {
     return false;
   }
   if (!BufferAppend(&content,
-                    "</h1><p class=\"notice\">This page does not exist yet.</p>"
+                    "</h1>\n<p class=\"notice\">This page does not exist yet.</p>\n"
                     "<p><a href=\"/edit/")) {
     return false;
   }
   if (!BufferAppend(&content, encodedSlug)) {
     return false;
   }
-  if (!BufferAppend(&content, "\">Create this page</a></p></article>")) {
+  if (!BufferAppend(&content, "\">Create this page</a></p>\n</article>\n")) {
     return false;
   }
 
@@ -1369,14 +1610,14 @@ bool BuildViewHtml(sqlite3* db,
     return false;
   }
 
-  if (!BufferAppend(&content, "<article><h1>")) {
+  if (!BufferAppend(&content, "<article>\n<h1>")) {
     return false;
   }
   if (!BufferAppendEscaped(&content, pageRecord->title,
                            std::strlen(pageRecord->title))) {
     return false;
   }
-  if (!BufferAppend(&content, "</h1><p class=\"meta\">slug: <code>")) {
+  if (!BufferAppend(&content, "</h1>\n<p class=\"meta\">slug: <code>")) {
     return false;
   }
   if (!BufferAppendEscaped(&content, pageRecord->slug,
@@ -1397,21 +1638,21 @@ bool BuildViewHtml(sqlite3* db,
                            std::strlen(pageRecord->updatedAt))) {
     return false;
   }
-  if (!BufferAppend(&content, "</p>")) {
+  if (!BufferAppend(&content, "</p>\n")) {
     return false;
   }
 
-  if (!BufferAppend(&content, "<div class=\"content-body\">")) {
+  if (!BufferAppend(&content, "<div class=\"content-body\">\n")) {
     return false;
   }
   if (!BufferAppend(&content, markdownHtml.data)) {
     return false;
   }
-  if (!BufferAppend(&content, "</div>")) {
+  if (!BufferAppend(&content, "</div>\n")) {
     return false;
   }
 
-  if (!BufferAppend(&content, "<section class=\"panel\"><h2>Backlinks</h2>")) {
+  if (!BufferAppend(&content, "<section class=\"panel\">\n<h2>Backlinks</h2>\n")) {
     return false;
   }
 
@@ -1420,7 +1661,7 @@ bool BuildViewHtml(sqlite3* db,
   }
 
   if (!BufferAppend(&content,
-                    "</section><section class=\"panel\"><h2>Images</h2>")) {
+                    "</section>\n<section class=\"panel\">\n<h2>Images</h2>\n")) {
     return false;
   }
 
@@ -1429,7 +1670,7 @@ bool BuildViewHtml(sqlite3* db,
     return false;
   }
 
-  if (!BufferAppend(&content, "</section></article>")) {
+  if (!BufferAppend(&content, "</section>\n</article>\n")) {
     return false;
   }
 
@@ -1458,7 +1699,7 @@ bool BuildImageUploadForm(RequestArena* arena,
     return false;
   }
 
-  if (!BufferAppend(&content, "<article><h1>Upload image for ")) {
+  if (!BufferAppend(&content, "<article>\n<h1>Upload image for ")) {
     return false;
   }
   if (!BufferAppendEscaped(&content, slug, std::strlen(slug))) {
@@ -1475,8 +1716,8 @@ bool BuildImageUploadForm(RequestArena* arena,
   }
   if (!BufferAppend(
           &content,
-          "\"><input type=\"file\" name=\"image\" accept=\"image/*\" required>"
-          "<br><br><div class=\"form-actions\">"
+          "\">\n<input type=\"file\" name=\"image\" accept=\"image/*\" required>"
+          "<br><br>\n<div class=\"form-actions\">"
           "<button type=\"submit\" class=\"action-button\">Upload</button> "
           "<a class=\"button-link button-secondary\" href=\"/page/")) {
     return false;
@@ -1484,7 +1725,7 @@ bool BuildImageUploadForm(RequestArena* arena,
   if (!BufferAppend(&content, encodedSlug)) {
     return false;
   }
-  if (!BufferAppend(&content, "\">Back</a></div></form></article>")) {
+  if (!BufferAppend(&content, "\">Back</a></div>\n</form>\n</article>\n")) {
     return false;
   }
 
@@ -1511,21 +1752,22 @@ bool BuildImageUploadedPage(RequestArena* arena,
   }
 
   if (!BufferAppend(&content,
-                    "<article><h1>Image uploaded</h1><p>Use this markdown in "
-                    "your page:</p><pre><code>![")) {
+                    "<article>\n<h1>Image uploaded</h1>\n"
+                    "<p>Use this markdown in your page:</p>\n"
+                    "<pre><code>![")) {
     return false;
   }
   if (!BufferAppendEscaped(&content, filename, std::strlen(filename))) {
     return false;
   }
   if (!BufferAppendFormat(
-          &content, "](/image/%d)</code></pre><p><a href=\"/edit/", imageId)) {
+          &content, "](/image/%d)</code></pre>\n<p><a href=\"/edit/", imageId)) {
     return false;
   }
   if (!BufferAppend(&content, encodedSlug)) {
     return false;
   }
-  if (!BufferAppend(&content, "\">Back to edit page</a></p></article>")) {
+  if (!BufferAppend(&content, "\">Back to edit page</a></p>\n</article>\n")) {
     return false;
   }
 

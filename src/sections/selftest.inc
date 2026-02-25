@@ -92,7 +92,7 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
   SelfTestExpect(state, std::strcmp(links[0], "target-page") == 0,
                  "ExtractWikiLinks slugifies");
 
-  static unsigned char arenaStorage[2U * MAX_RESPONSE_BYTES];
+  static unsigned char arenaStorage[4U * MAX_RESPONSE_BYTES];
   RequestArena arena;
   ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
   TextBuffer html;
@@ -140,7 +140,7 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
                  "Render inline code span");
   SelfTestExpect(
       state,
-      std::strstr(html.data, "<pre><code>if (a &lt; b) {\n  return c;\n}\n"
+      std::strstr(html.data, "<pre><code>if (a &lt; b) {\n  return c;\n}"
                              "</code></pre>\n") != nullptr,
       "Render multiline fenced code block");
   SelfTestExpect(state,
@@ -152,6 +152,46 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
       std::strstr(html.data, "<section class=\"panel footnotes\">") != nullptr,
       "Render footnotes section");
 
+  TextBuffer indentedHtml;
+  if (!ArenaAllocTextBuffer(&arena, &indentedHtml, MAX_RESPONSE_BYTES)) {
+    SelfTestExpect(state, false, "RenderMarkdownToHtml indented arena alloc");
+    return;
+  }
+  const bool renderedIndented = RenderMarkdownToHtml(
+      "  # Spaced Heading\n"
+      "  [^n]: note text\n"
+      "  ref[^n]\n"
+      "  > quote line\n"
+      "  ```\n"
+      "  code line\n"
+      "  ```\n",
+      &indentedHtml);
+  SelfTestExpect(state, renderedIndented,
+                 "RenderMarkdownToHtml accepts leading-space literal text");
+  SelfTestExpect(state,
+                 std::strstr(indentedHtml.data, "<p>  # Spaced Heading</p>") !=
+                     nullptr,
+                 "Leading-space heading marker remains paragraph text");
+  SelfTestExpect(state,
+                 std::strstr(indentedHtml.data,
+                             "<p>  [^n]: note text</p>") != nullptr,
+                 "Leading-space footnote definition remains paragraph text");
+  SelfTestExpect(state,
+                 std::strstr(indentedHtml.data, "<p>  ref[^n]</p>") != nullptr,
+                 "Leading-space footnote reference remains inline text");
+  SelfTestExpect(state,
+                 std::strstr(indentedHtml.data, "<p>  &gt; quote line</p>") !=
+                     nullptr,
+                 "Leading-space blockquote marker remains paragraph text");
+  SelfTestExpect(state,
+                 std::strstr(indentedHtml.data,
+                             "<p>  ```</p>") != nullptr,
+                 "Leading-space fence marker remains paragraph text");
+  SelfTestExpect(state,
+                 std::strstr(indentedHtml.data, "<p>  code line</p>") !=
+                     nullptr,
+                 "Leading-space code line remains paragraph text");
+
   static const unsigned char PNG_SIG[] = {0x89U, 0x50U, 0x4EU, 0x47U,
                                           0x0DU, 0x0AU, 0x1AU, 0x0AU};
   SelfTestExpect(state,
@@ -159,6 +199,7 @@ void SelfTestLinksAndMarkdown(SelfTestState* state) {
                              "image/png") == 0,
                  "DetectImageMimeFromData png");
 
+  ArenaReset(&arena, arenaStorage, sizeof(arenaStorage));
   TextBuffer securityHtml;
   if (!ArenaAllocTextBuffer(&arena, &securityHtml, MAX_RESPONSE_BYTES)) {
     SelfTestExpect(state, false, "RenderMarkdownToHtml security arena alloc");
@@ -414,6 +455,16 @@ void SelfTestHttpHandler(SelfTestState* state) {
                  std::strstr(reinterpret_cast<const char*>(response.body),
                              "data-md-action=\"codeblock\"") != nullptr,
                  "Edit page includes fenced code block toolbar button");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "insertText:'```\\ncode block\\n```'") != nullptr,
+      "Edit page code block action uses JS newline escapes");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "insertText:'[^note]\\n\\n[^note]: note text'") != nullptr,
+      "Edit page footnote action uses JS newline escapes");
   SelfTestExpect(state,
                  std::strstr(reinterpret_cast<const char*>(response.body),
                              "data-md-action=\"quote\"") == nullptr,
@@ -444,6 +495,20 @@ void SelfTestHttpHandler(SelfTestState* state) {
   HandleRequest(db, &arena, &request, &response);
   SelfTestExpect(state, response.status == 200,
                  "HandleRequest GET /edit/home with image");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "name=\"markdown\" required>Body</textarea>") != nullptr,
+      "Edit page preserves textarea markdown without layout indentation");
+  SelfTestExpect(
+      state,
+      std::strstr(reinterpret_cast<const char*>(response.body),
+                  "\n      </textarea>\n") != nullptr,
+      "Edit page aligns closing textarea tag");
+  SelfTestExpect(state,
+                 std::strstr(reinterpret_cast<const char*>(response.body),
+                             "\n      </script>\n") != nullptr,
+                 "Edit page aligns closing script tag");
   SelfTestExpect(
       state,
       std::strstr(reinterpret_cast<const char*>(response.body),

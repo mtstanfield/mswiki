@@ -56,7 +56,7 @@ bool DbAppendImagesHtml(sqlite3* db,
       continue;
     }
 
-    if (!BufferAppendFormat(html, "<li><a href=\"/image/%d\">", id)) {
+    if (!BufferAppendFormat(html, "<li>\n<a href=\"/image/%d\">", id)) {
       (void)sqlite3_finalize(stmt);
       return false;
     }
@@ -76,7 +76,7 @@ bool DbAppendImagesHtml(sqlite3* db,
       return false;
     }
     if (includeInsertButtons) {
-      if (!BufferAppend(html, " ")) {
+      if (!BufferAppend(html, "\n")) {
         (void)sqlite3_finalize(stmt);
         return false;
       }
@@ -92,7 +92,7 @@ bool DbAppendImagesHtml(sqlite3* db,
         (void)sqlite3_finalize(stmt);
         return false;
       }
-      if (!BufferAppend(html, "\">Insert</button> ")) {
+      if (!BufferAppend(html, "\">Insert</button>\n")) {
         (void)sqlite3_finalize(stmt);
         return false;
       }
@@ -110,14 +110,14 @@ bool DbAppendImagesHtml(sqlite3* db,
         return false;
       }
       if (!BufferAppend(html,
-                        "\"><button type=\"submit\" "
+                        "\">\n<button type=\"submit\" "
                         "class=\"action-button delete-button\">"
-                        "Delete image</button></form>")) {
+                        "Delete image</button>\n</form>")) {
         (void)sqlite3_finalize(stmt);
         return false;
       }
     }
-    if (!BufferAppend(html, "</li>\n")) {
+    if (!BufferAppend(html, "\n</li>\n")) {
       (void)sqlite3_finalize(stmt);
       return false;
     }
